@@ -206,6 +206,11 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Aemeath runtime data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
 # PyPI configuration file
 .pypirc
 

@@ -1,0 +1,2 @@
+"""Character assets and loaders."""
+
