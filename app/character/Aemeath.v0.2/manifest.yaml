@@ -1,0 +1,23 @@
+﻿schema_version: character_manifest.v0.2
+character_id: aemeath
+version: aemeath.v0.2
+status: draft
+
+components:
+  profile: profile.yaml
+  identity: identity.yaml
+  relationship_to_user: relationship_to_user.yaml
+  context_frame_policy: context_frame_policy.yaml
+  persona_rules: persona_rules.yaml
+  speech_rules: speech_rules.yaml
+  boundaries: boundaries.yaml
+  avoid: avoid.yaml
+  style_examples: style_examples.yaml
+  stable_lore_summary: stable_lore_summary.yaml
+  forbidden_claims: forbidden_claims.yaml
+  provenance: provenance.yaml
+
+loader:
+  component_mode: explicit_files
+  unknown_component_policy: ignore
+  missing_required_component_policy: error

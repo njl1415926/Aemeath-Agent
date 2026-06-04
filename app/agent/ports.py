@@ -1,25 +1,25 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.agent.prompt_context import PromptContext
-from app.agent.response_mode import ResponseMode
 from app.character.schemas import CharacterProfile, CharacterRuntimeContext
 from app.memory.schemas import MemoryQuery, MemorySearchResult
 from app.retrieval.schemas import EvidencePack
 from app.schemas import MemoryDecision, MemoryRecord, MessageRecord, RelationshipState, StateUpdate
 
 
-class ResponseModeRouterPort(Protocol):
-    def route(self, text: str) -> ResponseMode:
-        ...
-
-
 class CharacterProviderPort(Protocol):
-    def load_profile(self) -> CharacterProfile:
+    def load_profile(self, *, character_id: str | None = None) -> CharacterProfile:
         ...
 
-    def build_runtime_context(self, *, response_mode: str) -> CharacterRuntimeContext:
+    def build_runtime_context(
+        self,
+        *,
+        character_id: str | None = None,
+        user_input: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> CharacterRuntimeContext:
         ...
 
 
@@ -57,12 +57,12 @@ class ContextBuilderPort(Protocol):
         self,
         *,
         character_context: CharacterRuntimeContext,
-        response_mode: str,
         user_input: str,
         recent_messages: list[MessageRecord],
         long_term_memories: list[MemoryRecord],
         relationship_state: RelationshipState,
         evidence_pack: EvidencePack | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> PromptContext:
         ...
 
@@ -70,12 +70,12 @@ class ContextBuilderPort(Protocol):
         self,
         *,
         character_context: CharacterRuntimeContext,
-        response_mode: str,
         user_input: str,
         recent_messages: list[MessageRecord],
         long_term_memories: list[MemoryRecord],
         relationship_state: RelationshipState,
         evidence_pack: EvidencePack | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> list[dict[str, str]]:
         ...
 

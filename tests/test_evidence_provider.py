@@ -47,7 +47,6 @@ def test_empty_evidence_provider_returns_empty_pack():
         user_id="user_default",
         character_id="aemeath",
         query="hello",
-        response_mode="casual_chat",
     )
 
     assert pack.lore_results == []
@@ -63,7 +62,6 @@ def test_composite_evidence_provider_routes_lore_and_voice_retrievers():
         user_id="user_default",
         character_id="aemeath",
         query="Aemeath",
-        response_mode="lore_answer",
         metadata={"trace_id": "trace_1"},
     )
 

@@ -7,6 +7,7 @@ from app.utils.ids import new_id, utc_now
 
 TraceStatus = Literal["started", "completed", "failed", "skipped"]
 TraceLevel = Literal["debug", "info", "warning", "error"]
+PromptRunStatus = Literal["completed", "failed"]
 
 
 @dataclass
@@ -32,3 +33,22 @@ class TraceEvent:
     level: TraceLevel = "info"
     event_id: str = field(default_factory=lambda: new_id("trace"))
     created_at: str = field(default_factory=utc_now)
+
+
+@dataclass(frozen=True)
+class PromptRunRecord:
+    run_id: str
+    turn_id: str
+    session_id: str
+    user_id: str
+    character_id: str
+    model: str
+    messages: list[dict[str, str]]
+    prompt_context_metadata: dict[str, Any]
+    sections: list[dict[str, Any]]
+    response: str | None
+    warnings: list[str]
+    status: PromptRunStatus
+    created_at: str = field(default_factory=utc_now)
+    error_type: str | None = None
+    error: str | None = None

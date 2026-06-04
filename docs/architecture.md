@@ -1,5 +1,46 @@
 # Aemeath Agent Architecture
 
+## 2026-06-04 Manager Update: Prompt Assembly And JSONL Logs
+
+Prompt assembly now keeps a stable section order:
+
+```text
+base_instructions
+character_context / persona / speech / style / boundaries
+canon_evidence
+voice_evidence
+interaction_memories
+relationship_state
+recent_conversation
+current user message
+```
+
+`DialogueController` records prompt-run snapshots through `PromptRunLoggerPort`.
+The default runtime uses `JsonlPromptRunLogger` when
+`AEMEATH_ENABLE_PROMPT_RUN_LOG=true`, writing local JSONL files under
+`.aemeath/sessions/YYYY/MM/DD/rollout-*.jsonl`. This is an observability layer feature:
+it records prompt/response debugging data and does not replace `MessageStore`, memory, trace,
+or RAG evidence.
+
+## 2026-06-03 Manager Update: Module-Autonomous Decisions
+
+当前运行时不再使用全局 `ResponseModeRouter`。Controller 的职责是稳定编排：
+
+```text
+DialogueController
+  -> CharacterProviderPort.build_runtime_context(...)
+  -> MemoryReaderPort.retrieve_query(...)
+  -> EvidenceProviderPort.build_evidence_pack(...)
+  -> ContextBuilderPort.build_context(...)
+  -> ResponseGeneratorPort.generate(...)
+```
+
+是否读取记忆、是否检索剧情/语音证据、是否注入更多角色样例，都由对应模块内部决定。
+不需要工作时，模块返回空结果，例如 `[]` 或 `EvidencePack()`。这样可以避免一个中心 mode
+分类器膨胀，也方便后续接 memory embedding、RAG、tool calling、MCP 和 LangGraph。
+
+旧的 `response_mode` 仅保留在少量兼容参数和 Character manifest legacy 字段中，不再是架构边界。
+
 本文档描述 Aemeath Agent 当前架构、模块边界和后续扩展方向。它是 manager session 分配任务和审查实现的主要依据。
 
 ## 当前目标
@@ -26,7 +67,6 @@ AgentTurnInput
   |
   v
 DialogueController
-  |-- ResponseModeRouter
   |-- CharacterProvider
   |-- MessageStore
   |-- RelationshipStore
@@ -37,6 +77,7 @@ DialogueController
   |-- StateUpdater
   |-- MemoryWriteClassifier -> MemoryWriter
   |-- TraceLogger
+  |-- PromptRunLogger
   |
   v
 AgentTurnOutput
@@ -73,15 +114,17 @@ AgentTurnOutput
 - `app/character/provider.py`
 - `app/character/loader.py`
 - `app/character/schemas.py`
-- `app/character/aemeath.v0.1.yaml`
+- `app/character/Aemeath.v0.2/`
+- `app/character/Aemeath.v0.1/character.yaml`
 
 职责：
 
 - 加载角色卡。
 - 输出 `CharacterProfile` 和 `CharacterRuntimeContext`。
 - 屏蔽角色资料来源细节。
+- 通过 `CharacterRegistry` 按 `character_id` 选择角色 provider。
 
-当前 v0.1 只读取 YAML。后续可升级为角色 manifest + 多文档加载 + 角色知识索引。
+当前默认注册 `app/character/Aemeath.v0.2/` 多文件 manifest。`app/character/Aemeath.v0.1/character.yaml` 是 fallback；root-level `app/character/aemeath.v0.1.yaml` 已废弃但仍可显式加载兼容。后续可升级为多角色 manifest + 多文档加载 + 角色知识索引。
 
 ### Context Layer
 
@@ -105,6 +148,11 @@ AgentTurnOutput
 `PromptContext` 是 prompt-time 的一等对象。`ContextBuilder` 先输出结构化 `PromptContext`，再由 `PromptCompiler` 编译为 model messages。这样后续 trace、eval、token budget、critic 都可以引用稳定 section。
 
 ### Retrieval Layer
+
+Current active provider: `WorldInfoEvidenceProvider`.
+
+`EmptyEvidenceProvider` remains available as a no-evidence implementation for tests or explicitly
+disabled RAG runs, but it is no longer the default provider in `app/main.py`.
 
 位置：
 
@@ -158,6 +206,7 @@ AgentTurnOutput
 - `app/memory/writer.py`
 - `app/memory/classifier.py`
 - `app/memory/admin.py`
+- `app/memory/disabled.py`
 
 职责：
 
@@ -167,6 +216,12 @@ AgentTurnOutput
 - 提供 CLI 管理命令。
 
 当前实现是关键词检索 + 规则式写入判断。后续可以升级为 embedding 检索、LLM 记忆抽取、记忆合并、记忆衰减。
+
+v0.2 minimal runtime 默认使用 recent conversation 作为 memory baseline，并通过
+`AEMEATH_ENABLE_LONG_TERM_MEMORY=false` 关闭长期记忆读写。关闭时 `app/main.py`
+注入 disabled memory reader / writer / classifier，`DialogueController` 仍固定调用
+`MemoryReaderPort` / `MemoryWriterPort` / `MemoryWriteClassifierPort`，不承担长期记忆策略判断。
+`MemoryAdminService` 仍保留对已有长期记忆的管理能力。
 
 当前边界约定：
 
@@ -259,8 +314,8 @@ SQLite 是 v0.1 的实现选择，不应泄漏为业务模块的唯一依赖。
 ```text
 app/main.py
   creates SQLiteStore
-  creates CharacterProvider
-  creates EmptyEvidenceProvider
+  creates CharacterRegistry
+  creates WorldInfoEvidenceProvider
   creates NoopTraceLogger
   creates MemoryReader/Writer
   creates ResponseGenerator(ChatModelClient)
@@ -300,7 +355,7 @@ SQLiteStore
 
    每次 turn 记录：
 
-   - response mode
+   - module decision reasons
    - 使用的 memory ids
    - 使用的 evidence ids
    - state delta
@@ -324,10 +379,29 @@ SQLiteStore
 4. Multi-session User Profile
 5. Web UI 或 API Server
 
+### v0.4 推荐主线
+
+1. AgentRuntimeState
+2. Controller step 化
+3. LangGraph Runtime Spike
+4. Tool calling loop
+5. Checkpoint / resume / human-in-the-loop
+
+LangGraph 的定位是可选 runtime 编排层。它可以替换当前手写 `DialogueController` 的流程编排，但不应替代 memory、character、retrieval、model、state 等业务 service。迁移顺序应是先稳定 ports，再抽 `AgentRuntimeState`，再把现有步骤 node 化，最后再引入 LangGraph。
+
 ## 已知技术债
 
-1. `MemoryWriteClassifier`、`StateUpdateClassifier` 和 `ResponseModeRouter` 当前包含规则式中文关键词，且部分源码文本在 Windows 控制台显示为乱码。后续应统一检查源文件编码并增加行为测试。
+1. `MemoryWriteClassifier`、`StateUpdateClassifier` 和部分模块内部 policy 当前包含规则式中文关键词，且部分源码文本在 Windows 控制台显示为乱码。后续应统一检查源文件编码并增加行为测试。
 2. `ContextBuilder` 已产出 `PromptContext`，但 token budget、prompt section 裁剪和 prompt snapshot 尚未实现。
 3. `FallbackChatModelClient` 当前只返回温和兜底文本，后续应记录结构化错误。
 4. `CharacterProvider` 仍以 v0.1 YAML 为唯一来源，尚未接入角色文档管理系统。
 5. Memory update / merge / conflict / decay 仍未真正实现，只保留了决策字段和 backlog。
+## 2026-06-04 Retrieval Runtime Update
+
+- The active main-runtime `EvidenceProviderPort` implementation is now
+  `WorldInfoEvidenceProvider`.
+- `DialogueController` still depends only on `EvidenceProviderPort` and does not know about
+  World Info JSON paths, keyword matching, constants, or retriever internals.
+- `WorldInfoEvidenceProvider` returns World Info matches through `EvidencePack.lore_results`.
+- Embedding/vector RAG remains available as retrieval tooling, but it is not the active provider
+  wired by `app/main.py`.

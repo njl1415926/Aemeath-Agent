@@ -15,7 +15,6 @@ class PromptSection:
 
 @dataclass(frozen=True)
 class PromptContext:
-    response_mode: str
     user_input: str
     sections: list[PromptSection]
     metadata: dict[str, Any] = field(default_factory=dict)

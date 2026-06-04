@@ -4,8 +4,8 @@ from app.schemas import AgentTurnInput
 from app.utils.ids import new_id
 
 
-def test_memory_write_for_explicit_instruction(controller_and_store):
-    controller, store, settings = controller_and_store
+def test_memory_write_for_explicit_instruction(long_term_memory_controller_and_store):
+    controller, store, settings = long_term_memory_controller_and_store
     session_id = new_id("session")
     turn = AgentTurnInput(
         user_id=settings.default_user_id,
@@ -20,8 +20,8 @@ def test_memory_write_for_explicit_instruction(controller_and_store):
     assert any("记忆机制" in memory.content for memory in memories)
 
 
-def test_memory_not_written_for_small_talk(controller_and_store):
-    controller, store, settings = controller_and_store
+def test_memory_not_written_for_small_talk(long_term_memory_controller_and_store):
+    controller, store, settings = long_term_memory_controller_and_store
     session_id = new_id("session")
     turn = AgentTurnInput(
         user_id=settings.default_user_id,
@@ -33,4 +33,3 @@ def test_memory_not_written_for_small_talk(controller_and_store):
     controller.handle_user_message(turn)
     memories = store.list_active_memories(user_id=settings.default_user_id)
     assert memories == []
-

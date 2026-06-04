@@ -18,14 +18,15 @@ class ContextBuilder:
         self,
         *,
         character_context: CharacterRuntimeContext,
-        response_mode: str,
         user_input: str,
         recent_messages: list[MessageRecord],
         long_term_memories: list[MemoryRecord],
         relationship_state: RelationshipState,
         evidence_pack: EvidencePack | None = None,
+        metadata: dict | None = None,
     ) -> PromptContext:
         evidence_pack = evidence_pack or EvidencePack()
+        metadata = dict(metadata or {})
         memory_lines = [
             f"- [{m.id}] ({m.memory_type}, importance={m.importance}): {m.content}"
             for m in long_term_memories
@@ -51,8 +52,6 @@ class ContextBuilder:
                 title="Base instructions:",
                 content_lines=[
                     self.prompt_template.strip(),
-                    "",
-                    f"Response mode: {response_mode}",
                 ],
             ),
             PromptSection(
@@ -80,32 +79,26 @@ class ContextBuilder:
                 content_lines=[f"- {rule}" for rule in character_context.speech_rules],
             ),
             PromptSection(
+                id="style_examples",
+                title="Style examples:",
+                content_lines=[f"- {example}" for example in character_context.style_examples]
+                or ["- (none)"],
+            ),
+            PromptSection(
                 id="boundaries",
                 title="Boundaries:",
                 content_lines=[f"- {rule}" for rule in character_context.boundaries],
             ),
             PromptSection(
+                id="forbidden_claims",
+                title="Forbidden claims:",
+                content_lines=[f"- {claim}" for claim in character_context.forbidden_claims]
+                or ["- (none)"],
+            ),
+            PromptSection(
                 id="avoid",
                 title="Avoid:",
                 content_lines=[f"- {rule}" for rule in character_context.avoid],
-            ),
-            PromptSection(
-                id="relationship_state",
-                title="Current relationship state:",
-                content_lines=[
-                    f"- mood: {relationship_state.mood}",
-                    f"- user_emotion: {relationship_state.user_emotion}",
-                    f"- trust: {relationship_state.trust}",
-                    f"- affection: {relationship_state.affection}",
-                    f"- familiarity: {relationship_state.familiarity}",
-                    f"- last_topic: {relationship_state.last_topic}",
-                ],
-            ),
-            PromptSection(
-                id="interaction_memories",
-                title="Long-term user memories:",
-                source_ids=[m.id for m in long_term_memories],
-                content_lines=memory_lines,
             ),
             PromptSection(
                 id="canon_evidence",
@@ -120,6 +113,24 @@ class ContextBuilder:
                 content_lines=voice_lines,
             ),
             PromptSection(
+                id="interaction_memories",
+                title="Long-term user memories:",
+                source_ids=[m.id for m in long_term_memories],
+                content_lines=memory_lines,
+            ),
+            PromptSection(
+                id="relationship_state",
+                title="Current relationship state:",
+                content_lines=[
+                    f"- mood: {relationship_state.mood}",
+                    f"- user_emotion: {relationship_state.user_emotion}",
+                    f"- trust: {relationship_state.trust}",
+                    f"- affection: {relationship_state.affection}",
+                    f"- familiarity: {relationship_state.familiarity}",
+                    f"- last_topic: {relationship_state.last_topic}",
+                ],
+            ),
+            PromptSection(
                 id="recent_conversation",
                 title="Recent conversation:",
                 source_ids=[m.id for m in recent_messages],
@@ -128,11 +139,11 @@ class ContextBuilder:
         ]
 
         return PromptContext(
-            response_mode=response_mode,
             user_input=user_input,
             sections=sections,
             metadata={
                 "character_id": character_context.character_id,
+                **metadata,
                 "evidence_ids": {
                     "lore": [item.id for item in evidence_pack.lore_results],
                     "voice": [item.id for item in evidence_pack.voice_results],
@@ -145,20 +156,20 @@ class ContextBuilder:
         self,
         *,
         character_context: CharacterRuntimeContext,
-        response_mode: str,
         user_input: str,
         recent_messages: list[MessageRecord],
         long_term_memories: list[MemoryRecord],
         relationship_state: RelationshipState,
         evidence_pack: EvidencePack | None = None,
+        metadata: dict | None = None,
     ) -> list[dict[str, str]]:
         prompt_context = self.build_context(
             character_context=character_context,
-            response_mode=response_mode,
             user_input=user_input,
             recent_messages=recent_messages,
             long_term_memories=long_term_memories,
             relationship_state=relationship_state,
             evidence_pack=evidence_pack,
+            metadata=metadata,
         )
         return self.prompt_compiler.compile_messages(context=prompt_context)

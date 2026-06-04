@@ -23,6 +23,9 @@ class Settings:
     use_mock_llm: bool
     character_card_path: Path
     prompt_template_path: Path
+    enable_long_term_memory: bool = False
+    enable_prompt_run_log: bool = True
+    prompt_run_log_root: Path = Path(".aemeath/sessions")
     default_user_id: str = "user_default"
     default_character_id: str = "aemeath"
 
@@ -47,10 +50,19 @@ class Settings:
             recent_message_limit=max(1, recent_limit),
             use_mock_llm=use_mock,
             character_card_path=Path(
-                os.getenv("AEMEATH_CHARACTER_CARD_PATH", "app/character/aemeath.v0.1.yaml")
+                os.getenv("AEMEATH_CHARACTER_CARD_PATH", "app/character/Aemeath.v0.2")
             ),
             prompt_template_path=Path(
                 os.getenv("AEMEATH_DIALOGUE_PROMPT_PATH", "app/prompts/dialogue_prompt.v0.1.md")
+            ),
+            enable_long_term_memory=_parse_bool(
+                os.getenv("AEMEATH_ENABLE_LONG_TERM_MEMORY", "false")
+            ),
+            enable_prompt_run_log=_parse_bool(
+                os.getenv("AEMEATH_ENABLE_PROMPT_RUN_LOG", "true")
+            ),
+            prompt_run_log_root=Path(
+                os.getenv("AEMEATH_PROMPT_RUN_LOG_ROOT", ".aemeath/sessions")
             ),
         )
 

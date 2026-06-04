@@ -1,5 +1,46 @@
 # Aemeath Agent Interfaces
 
+## 2026-06-04 Manager Update: Prompt Run Logging
+
+Current runtime now exposes prompt-run logging as an observability port.
+
+New contract:
+- `PromptRunLoggerPort.record(record: PromptRunRecord) -> None`
+- `PromptRunRecord` captures `run_id`, `turn_id`, `session_id`, `user_id`,
+  `character_id`, `created_at`, `model`, compiled `messages`, structured prompt
+  `sections`, `prompt_context_metadata`, `response`, `warnings`, `status`, and optional
+  failure details.
+- Runtime wiring chooses `JsonlPromptRunLogger` when
+  `AEMEATH_ENABLE_PROMPT_RUN_LOG=true`; otherwise it uses `NoopPromptRunLogger`.
+- Default log root is `.aemeath/sessions`.
+
+Prompt section order is now:
+`base_instructions -> character sections -> canon_evidence -> voice_evidence ->
+interaction_memories -> relationship_state -> recent_conversation -> current user message`.
+
+Boundary:
+- Prompt run logs are local debugging/eval artifacts, not memory.
+- They must not record API keys or authorization tokens.
+- Future trace, eval, LangGraph checkpointing, or UI viewers should consume this port or an
+  adapter around it instead of reaching into `DialogueController` internals.
+
+## 2026-06-03 Manager Update: No Global Response Mode
+
+当前运行时已经移除全局 `ResponseModeRouter`。`DialogueController` 不再把一轮对话分类成
+`casual_chat`、`lore_answer`、`comfort` 等 mode，也不再把 mode 传给下游模块。
+
+新的接口原则：
+
+- `DialogueController` 每轮仍固定调用稳定 port。
+- 模块自己判断是否需要工作；不需要时返回空结果。
+- `MemoryReaderPort.retrieve_query(...)` 内部决定是否读记忆，必要时返回 `[]`。
+- `EvidenceProviderPort.build_evidence_pack(...)` 内部决定是否查 lore / plot / voice，必要时返回空 `EvidencePack()`。
+- `CharacterProviderPort.build_runtime_context(...)` 内部决定角色上下文和样例选择。
+- Tool / MCP 后续也应通过自己的 policy / detector 判断，不依赖全局 mode。
+
+兼容说明：Character v0.2 manifest 中仍存在 `inject.response_modes`，部分 provider 仍接受可选
+`response_mode` keyword 给旧测试或调试脚本使用。这些都视为 legacy adapter 字段，不是当前架构契约。
+
 本文档定义 Aemeath Agent 当前稳定接口和后续扩展约束。Worker session 实现功能时应优先依赖这些接口，而不是直接耦合具体实现。
 
 ## Core Turn Contract
@@ -36,7 +77,6 @@ class AgentTurnOutput:
     turn_id: str
     session_id: str
     response: str
-    response_mode: str
     used_memory_ids: list[str]
     state_delta: dict[str, int]
     warnings: list[str] = field(default_factory=list)
@@ -59,7 +99,6 @@ class AgentTurnOutput:
 
 `DialogueController` 是编排者，只依赖以下 ports：
 
-- `ResponseModeRouterPort`
 - `CharacterProviderPort`
 - `EvidenceProviderPort`
 - `MemoryReaderPort`
@@ -69,6 +108,7 @@ class AgentTurnOutput:
 - `ContextBuilderPort`
 - `ResponseGeneratorPort`
 - `TraceLoggerPort`
+- `PromptRunLoggerPort`
 - `MessageStore`
 - `RelationshipStore`
 
@@ -156,7 +196,6 @@ class AgentTurnOutput:
 
 一次模型调用前的结构化上下文：
 
-- `response_mode`
 - `user_input`
 - `sections`
 - `metadata`
@@ -218,7 +257,10 @@ ContextBuilder.build_context()
 
 - 新角色资料来源应被 `CharacterProvider` 吸收，不应让 `DialogueController` 直接读取角色文档。
 - 剧情证据和语音证据优先通过 `EvidencePack` 进入 `ContextBuilder`。
-- `source_doc_ids` 应用于 trace 和角色行为审查。
+- `source_doc_ids` 是兼容字段，可为空或粗粒度填写；v0.2 Character 质量控制不围绕它设计。角色规则治理优先使用 rule id、`source_type`、`review_status` 和人工审核。
+- `CharacterRegistry` 是多角色入口；当前默认注册 `app/character/Aemeath.v0.2/`，fallback 为 `app/character/Aemeath.v0.1/character.yaml`。root-level `app/character/aemeath.v0.1.yaml` 已废弃但仍可显式加载兼容。
+- `DialogueController` 应按 `AgentTurnInput.character_id` 请求角色资料。
+- 未注册角色应降级到默认角色并写入 warning / trace，不应静默使用错误角色。
 
 ## Retrieval Interfaces
 
@@ -271,7 +313,6 @@ class EvidenceProviderPort(Protocol):
         user_id: str,
         character_id: str,
         query: str,
-        response_mode: str,
         metadata: dict[str, Any] | None = None,
     ) -> EvidencePack:
         ...
@@ -531,7 +572,6 @@ class TraceLoggerPort(Protocol):
 
 位置：
 
-- `app/agent/response_mode.py`
 
 当前模式：
 
@@ -545,8 +585,8 @@ class TraceLoggerPort(Protocol):
 
 扩展约束：
 
-- 新 response mode 必须更新 prompt 策略和测试样例。
-- 不同 mode 可以影响检索策略、语气强度和是否启用 thinking。
+- 新的对话决策维度应进入对应模块 policy，而不是恢复全局 response mode。
+- 检索策略、语气强度和 thinking 等行为应由对应模块或模型 provider 内部策略决定。
 
 ## Interface Change Procedure
 
@@ -560,3 +600,22 @@ class TraceLoggerPort(Protocol):
 pytest
 ruff check .
 ```
+## 2026-06-04 Retrieval Interface Update
+
+- `WorldInfoEvidenceProvider` is the active main-runtime implementation of
+  `EvidenceProviderPort`.
+- It preserves the public interface:
+
+```python
+build_evidence_pack(
+    *,
+    user_id: str,
+    character_id: str,
+    query: str,
+    metadata: dict | None = None,
+) -> EvidencePack
+```
+
+- World Info results are returned as `EvidencePack.lore_results`.
+- `voice_results` remains empty for the World Info provider.
+- Controller, Character, and Memory layers do not call `WorldInfoKeywordRetriever` directly.

@@ -1,0 +1,9 @@
+﻿schema_version: character_card.v0.1
+character_id: aemeath
+version: aemeath.v0.1
+status: legacy
+
+entrypoint: character.yaml
+loader:
+  component_mode: single_file
+  compatibility_note: Mirrors app/character/aemeath.v0.1.yaml for path layout consistency. Keep the original file until config and tests move to directory loading.

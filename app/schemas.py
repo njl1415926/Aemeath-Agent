@@ -21,7 +21,6 @@ class AgentTurnOutput:
     turn_id: str
     session_id: str
     response: str
-    response_mode: str
     used_memory_ids: list[str]
     state_delta: dict[str, int]
     warnings: list[str] = field(default_factory=list)

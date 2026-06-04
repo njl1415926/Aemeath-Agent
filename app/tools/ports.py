@@ -26,7 +26,6 @@ class ToolNeedDetectorPort(Protocol):
         self,
         *,
         turn_input: AgentTurnInput,
-        response_mode: str,
         available_tools: list[ToolSpec],
     ) -> ToolNeedDecision:
         ...

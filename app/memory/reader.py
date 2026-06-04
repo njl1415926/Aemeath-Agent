@@ -11,6 +11,30 @@ class MemoryReader:
     def __init__(self, store: MemoryStore):
         self.store = store
 
+    def _should_read(self, *, memory_query: MemoryQuery, tokens: list[str]) -> bool:
+        if memory_query.reason in {"forced", "memory_focus"}:
+            return True
+        recall_keywords = [
+            "\u8bb0\u5f97",
+            "\u8fd8\u8bb0\u5f97",
+            "\u56de\u5fc6",
+            "\u4e4b\u524d",
+        ]
+        if any(keyword in memory_query.query_text for keyword in recall_keywords):
+            return True
+        low_information_inputs = {
+            "\u4f60\u597d",
+            "\u55e8",
+            "hi",
+            "hello",
+            "\u65e9\u4e0a\u597d",
+            "\u665a\u4e0a\u597d",
+        }
+        normalized = memory_query.query_text.strip().lower()
+        if normalized in low_information_inputs:
+            return False
+        return bool(tokens)
+
     def _extract_keywords(self, text: str) -> list[str]:
         chinese_tokens = [
             token
@@ -22,12 +46,19 @@ class MemoryReader:
 
     def retrieve_query(self, *, memory_query: MemoryQuery) -> list[MemorySearchResult]:
         tokens = self._extract_keywords(memory_query.query_text)
+        if not self._should_read(memory_query=memory_query, tokens=tokens):
+            return []
         memories = self.store.search_memories_keyword(
             user_id=memory_query.user_id,
             keywords=tokens,
             limit=memory_query.limit,
         )
-        recall_keywords = ["记得", "还记得", "回忆", "之前"]
+        recall_keywords = [
+            "\u8bb0\u5f97",
+            "\u8fd8\u8bb0\u5f97",
+            "\u56de\u5fc6",
+            "\u4e4b\u524d",
+        ]
         if (not memories) and any(
             keyword in memory_query.query_text for keyword in recall_keywords
         ):
