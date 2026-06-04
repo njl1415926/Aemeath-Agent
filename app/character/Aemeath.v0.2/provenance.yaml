@@ -1,0 +1,86 @@
+﻿provenance:
+  source_docs:
+    - id: skill/SKILL.md
+      path: Aemeath_roleplay_skill/skill/SKILL.md
+      layer: persona_core
+      source_type: derived
+      runtime_read: false
+      description: 角色对话总览、默认时间点、用户身份、核心人格和边界。
+    - id: skill/Instructions.md
+      path: Aemeath_roleplay_skill/skill/Instructions.md
+      layer: persona_core
+      source_type: authorial
+      runtime_read: false
+      description: 角色扮演入口指令、输出格式、当前状态和禁止项。
+    - id: skill/personality.md
+      path: Aemeath_roleplay_skill/skill/personality.md
+      layer: persona_core
+      source_type: derived
+      runtime_read: false
+      description: 人格、情绪机制、成长变化和关系理解。
+    - id: skill/speech_style.md
+      path: Aemeath_roleplay_skill/skill/speech_style.md
+      layer: speech_style
+      source_type: derived
+      runtime_read: false
+      description: 语气、称呼、动作、回答长度和情绪转折规则。
+    - id: skill/boundaries.md
+      path: Aemeath_roleplay_skill/skill/boundaries.md
+      layer: boundary
+      source_type: authorial
+      runtime_read: false
+      description: 状态边界、未知剧情、现实问题和动作描写边界。
+    - id: skill/lore.md
+      path: Aemeath_roleplay_skill/skill/lore.md
+      layer: stable_lore
+      source_type: derived
+      runtime_read: false
+      description: 3.1、3.3、后日谈剧情背景与核心事实。
+    - id: lore_and_voice/aemeath_3_1_lore_and_voice.md
+      path: Aemeath_roleplay_skill/lore_and_voice/aemeath_3_1_lore_and_voice.md
+      layer: rag_source
+      source_type: derived
+      runtime_read: false
+      description: 3.1 剧情摘要、人设总结和语气样本来源。
+    - id: lore_and_voice/aemeath_3_3_lore_and_voice.md
+      path: Aemeath_roleplay_skill/lore_and_voice/aemeath_3_3_lore_and_voice.md
+      layer: rag_source
+      source_type: derived
+      runtime_read: false
+      description: 3.3 主线摘要、人设补充和语气样本来源。
+    - id: lore_and_voice/aemeath_3_3_epilogue_lore_and_voice.md
+      path: Aemeath_roleplay_skill/lore_and_voice/aemeath_3_3_epilogue_lore_and_voice.md
+      layer: rag_source
+      source_type: derived
+      runtime_read: false
+      description: 后日谈当前状态、互相关心、驾驶空壳和学业计划来源。
+    - id: wuthering_waves_gamedata/favor_role_infos.json#1210
+      path: Aemeath_roleplay_skill/wuthering_waves_gamedata/favor_role_infos.json
+      layer: canon_profile
+      source_type: canon
+      runtime_read: false
+      description: 爱弥斯角色基础信息、能力档案和电子幽灵/数据系统能力来源。
+    - id: wuthering_waves_gamedata/favor_words.json
+      path: Aemeath_roleplay_skill/wuthering_waves_gamedata/favor_words.json
+      layer: canon_voice
+      source_type: canon
+      runtime_read: false
+      description: 爱弥斯心声、喜好、抱负、战斗和关系语音来源。
+    - id: wuthering_waves_gamedata/favor_goods.json
+      path: Aemeath_roleplay_skill/wuthering_waves_gamedata/favor_goods.json
+      layer: canon_lore
+      source_type: canon
+      runtime_read: false
+      description: 爱弥斯偏好物品、童年记忆和小屋关系来源。
+    - id: wuthering_waves_gamedata/favor_stories.json
+      path: Aemeath_roleplay_skill/wuthering_waves_gamedata/favor_stories.json
+      layer: canon_lore
+      source_type: canon
+      runtime_read: false
+      description: 爱弥斯个性故事、深层心理、保护欲和孤独来源。
+    - id: docs/character_manifest_design.md
+      path: docs/character_manifest_design.md
+      layer: authorial_policy
+      source_type: authorial
+      runtime_read: false
+      description: Character manifest 多文件结构、RAG 边界和现实语境处理策略。

@@ -1,46 +1,61 @@
 # Aemeath Agent
 
-Aemeath Agent v0.1 是一个以《鸣潮》爱弥斯为原型的 CLI 对话 Agent，目标是跑通最小记忆闭环。
+Aemeath Agent v0.2 is a CLI roleplay dialogue agent based on Aemeath from
+Wuthering Waves. The current runtime focuses on a small but extensible loop:
+character context, World Info RAG, recent conversation memory, prompt assembly,
+DeepSeek-compatible model calls, and local prompt-run debugging logs.
 
-## v0.1 Features
+## v0.2 Features
 
-- CLI 多轮对话
-- 角色卡 YAML 加载
-- SQLite 对话日志
-- 长期记忆写入与检索
-- 关系 / 情绪状态更新
-- Memory Admin 命令：`/memory list|delete|disable`
-- MockLLMClient（测试默认不依赖真实模型）
-
-## v0.1 Boundaries
-
-当前版本不包含：剧情知识库、RAG、Critic、Trace Viewer、Web UI、多 Agent、MCP。
+- CLI multi-turn dialogue.
+- Character v0.2 manifest loaded from `app/character/Aemeath.v0.2/`.
+- World Info keyword RAG through `WorldInfoEvidenceProvider`.
+- Recent conversation as the default minimal memory baseline.
+- Optional long-term memory behind `AEMEATH_ENABLE_LONG_TERM_MEMORY`.
+- Prompt context assembled as structured sections before model calls.
+- Local JSONL prompt-run logs under `.aemeath/sessions/`.
+- Prompt log inspector for debugging prompt, RAG, memory, and response behavior.
+- Mock model mode for local testing without an API key.
 
 ## Quick Start
 
-1. 安装依赖
+Install dependencies:
 
 ```bash
 pip install -e .[dev]
 ```
 
-2. 配置本地环境变量
-
-`.env.example` 是模板，真实配置放在本地 `.env`。`.env` 已被 `.gitignore` 忽略，不会提交到仓库。
-
-Mock 模式：
-
-```env
-AEMEATH_USE_MOCK_LLM=true
-```
-
-使用 DeepSeek v4：
+Copy the environment template:
 
 ```bash
 copy .env.example .env
 ```
 
-然后编辑 `.env`：
+Run with the mock model:
+
+```env
+AEMEATH_USE_MOCK_LLM=true
+```
+
+Start the CLI:
+
+```bash
+python -m app.cli
+```
+
+Useful CLI commands:
+
+```text
+/help
+/exit
+/memory list
+/memory delete <memory_id>
+/memory disable <memory_id>
+```
+
+## DeepSeek Runtime
+
+To call DeepSeek, edit `.env`:
 
 ```env
 AEMEATH_USE_MOCK_LLM=false
@@ -51,25 +66,73 @@ DEEPSEEK_THINKING=disabled
 DEEPSEEK_REASONING_EFFORT=
 ```
 
-如果希望速度优先，可以把 `DEEPSEEK_MODEL` 改为 `deepseek-v4-flash`。
+Do not commit `.env` or real API keys.
 
-3. 启动 CLI
+## Prompt Logs
 
-```bash
-python -m app.cli
+Prompt-run logging is enabled by default:
+
+```env
+AEMEATH_ENABLE_PROMPT_RUN_LOG=true
+AEMEATH_PROMPT_RUN_LOG_ROOT=.aemeath/sessions
 ```
 
-## CLI Commands
+After at least one successful CLI turn, inspect the latest prompt log:
 
-- `/help`
-- `/exit`
-- `/memory list`
-- `/memory delete <memory_id>`
-- `/memory disable <memory_id>`
+```bash
+python scripts/inspect_prompt_log.py
+```
 
-## Test
+Common options:
+
+```bash
+python scripts/inspect_prompt_log.py --limit 3
+python scripts/inspect_prompt_log.py --show-system
+python scripts/inspect_prompt_log.py --hide-sections
+```
+
+Logs are local runtime data and are ignored by git.
+
+## RAG And Data
+
+The active v0.2 runtime uses the curated World Info file:
+
+```text
+app/retrieval/data/Aemeath_World_Info.json
+```
+
+The `source_doc/` directory is treated as local source material and is not part
+of the release branch.
+
+Embedding RAG utilities exist under `app/retrieval/` and `scripts/`, but vector
+RAG is not the active provider in the main runtime yet.
+
+## Tests
+
+Run:
 
 ```bash
 pytest
 ruff check .
 ```
+
+Current release validation:
+
+```text
+pytest
+ruff check .
+```
+
+## Project Coordination
+
+This project is managed as a multi-session coding effort. New coding sessions
+should read:
+
+```text
+AGENTS.md
+docs/architecture.md
+docs/interfaces.md
+docs/task_log.md
+```
+
+The manager session owns architecture, task splitting, and interface stability.

@@ -25,7 +25,6 @@ class EvidenceProviderPort(Protocol):
         user_id: str,
         character_id: str,
         query: str,
-        response_mode: str,
         metadata: dict[str, Any] | None = None,
     ) -> EvidencePack:
         ...

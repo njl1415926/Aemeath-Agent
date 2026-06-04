@@ -27,7 +27,6 @@ class ToolContext:
     user_id: str
     session_id: str
     character_id: str
-    response_mode: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

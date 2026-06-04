@@ -207,9 +207,12 @@ tempCodeRunnerFile.py
 .ruff_cache/
 
 # Aemeath runtime data
+.aemeath/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+source_doc/
+Aemeath_roleplay_skill/wuthering_waves_gamedata/
 
 # PyPI configuration file
 .pypirc

@@ -10,14 +10,13 @@ from app.agent.ports import (
     MemoryWriteClassifierPort,
     MemoryWriterPort,
     ResponseGeneratorPort,
-    ResponseModeRouterPort,
     StateUpdaterPort,
 )
 from app.agent.prompt_context import PromptCompiler
 from app.config import Settings
 from app.memory.schemas import MemoryQuery
-from app.observability.ports import TraceLoggerPort
-from app.observability.schemas import ConversationRun, TraceEvent
+from app.observability.ports import PromptRunLoggerPort, TraceLoggerPort
+from app.observability.schemas import ConversationRun, PromptRunRecord, TraceEvent
 from app.retrieval.ports import EvidenceProviderPort
 from app.schemas import AgentTurnInput, AgentTurnOutput
 from app.state.store import RelationshipStore
@@ -46,12 +45,12 @@ class DialogueController:
         memory_writer: MemoryWriterPort,
         memory_write_classifier: MemoryWriteClassifierPort,
         state_updater: StateUpdaterPort,
-        response_mode_router: ResponseModeRouterPort,
         character_provider: CharacterProviderPort,
         evidence_provider: EvidenceProviderPort,
         context_builder: ContextBuilderPort,
         response_generator: ResponseGeneratorPort,
         trace_logger: TraceLoggerPort,
+        prompt_run_logger: PromptRunLoggerPort,
     ):
         self.settings = settings
         self.message_store = message_store
@@ -60,14 +59,13 @@ class DialogueController:
         self.memory_writer = memory_writer
         self.memory_write_classifier = memory_write_classifier
         self.state_updater = state_updater
-        self.response_mode_router = response_mode_router
         self.character_provider = character_provider
         self.evidence_provider = evidence_provider
         self.context_builder = context_builder
         self.response_generator = response_generator
         self.trace_logger = trace_logger
+        self.prompt_run_logger = prompt_run_logger
         self.prompt_compiler = PromptCompiler()
-        self.character_profile = self.character_provider.load_profile()
 
     def _safe_trace_payload(self, value: Any) -> Any:
         if isinstance(value, dict):
@@ -107,16 +105,75 @@ class DialogueController:
             )
         )
 
+    def _serialize_prompt_sections(self, prompt_context) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": section.id,
+                "title": section.title,
+                "content_lines": section.content_lines,
+                "source_ids": section.source_ids,
+                "metadata": self._safe_trace_payload(section.metadata),
+            }
+            for section in prompt_context.sections
+        ]
+
+    def _record_prompt_run(
+        self,
+        *,
+        turn_id: str,
+        turn_input: AgentTurnInput,
+        active_character_id: str,
+        prompt_messages: list[dict[str, str]],
+        prompt_context_metadata: dict[str, Any],
+        sections: list[dict[str, Any]],
+        response: str | None,
+        warnings: list[str],
+        status: str,
+        error_type: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.prompt_run_logger.record(
+            PromptRunRecord(
+                run_id=new_id("prompt_run"),
+                turn_id=turn_id,
+                session_id=turn_input.session_id,
+                user_id=turn_input.user_id,
+                character_id=active_character_id,
+                model=self.settings.aemeath_model,
+                messages=self._safe_trace_payload(prompt_messages),
+                prompt_context_metadata=self._safe_trace_payload(prompt_context_metadata),
+                sections=self._safe_trace_payload(sections),
+                response=response,
+                warnings=list(warnings),
+                status=status,
+                error_type=error_type,
+                error=error,
+            )
+        )
+
     def handle_user_message(self, turn_input: AgentTurnInput) -> AgentTurnOutput:
         turn_id = new_id("turn")
-        active_character_id = self.character_profile.character_id
+        warnings: list[str] = []
+        prompt_messages: list[dict[str, str]] | None = None
+        prompt_context_metadata: dict[str, Any] | None = None
+        prompt_sections: list[dict[str, Any]] | None = None
+        response: str | None = None
+        try:
+            character_profile = self.character_provider.load_profile(
+                character_id=turn_input.character_id,
+            )
+        except KeyError:
+            character_profile = self.character_provider.load_profile(
+                character_id=self.settings.default_character_id,
+            )
+            warnings.append("character_id_unknown_using_default_profile")
+        active_character_id = character_profile.character_id
         run = ConversationRun(
             turn_id=turn_id,
             user_id=turn_input.user_id,
             session_id=turn_input.session_id,
             character_id=active_character_id,
         )
-        warnings: list[str] = []
         if turn_input.character_id != active_character_id:
             warnings.append("character_id_mismatch_using_loaded_profile")
         self._record_trace(
@@ -133,7 +190,7 @@ class DialogueController:
         try:
             if turn_input.character_id != active_character_id:
                 self._record_trace(
-                    event_type="character_id_mismatch",
+                    event_type="character_id_fallback",
                     turn_id=turn_id,
                     turn_input=turn_input,
                     payload={
@@ -143,16 +200,10 @@ class DialogueController:
                     level="warning",
                     character_id=active_character_id,
                 )
-            response_mode = self.response_mode_router.route(turn_input.message)
-            self._record_trace(
-                event_type="response_mode_selected",
-                turn_id=turn_id,
-                turn_input=turn_input,
-                payload={"response_mode": response_mode},
-                character_id=active_character_id,
-            )
             character_context = self.character_provider.build_runtime_context(
-                response_mode=response_mode,
+                character_id=active_character_id,
+                user_input=turn_input.message,
+                metadata=turn_input.metadata,
             )
             user_message_id = self.message_store.save_message(
                 session_id=turn_input.session_id,
@@ -164,6 +215,9 @@ class DialogueController:
                 session_id=turn_input.session_id,
                 limit=self.settings.recent_message_limit,
             )
+            recent_messages = [
+                message for message in recent_messages if message.id != user_message_id
+            ]
             relationship_state = self.relationship_store.get_or_create_relationship_state(
                 user_id=turn_input.user_id,
                 character_id=active_character_id,
@@ -181,7 +235,6 @@ class DialogueController:
                 user_id=turn_input.user_id,
                 character_id=active_character_id,
                 query=turn_input.message,
-                response_mode=response_mode,
                 metadata=turn_input.metadata,
             )
             self._record_trace(
@@ -204,13 +257,15 @@ class DialogueController:
             )
             prompt_context = self.context_builder.build_context(
                 character_context=character_context,
-                response_mode=response_mode,
                 user_input=turn_input.message,
                 recent_messages=recent_messages,
                 long_term_memories=retrieved_memories,
                 relationship_state=relationship_state,
                 evidence_pack=evidence_pack,
+                metadata=turn_input.metadata,
             )
+            prompt_context_metadata = prompt_context.metadata
+            prompt_sections = self._serialize_prompt_sections(prompt_context)
             self._record_trace(
                 event_type="prompt_context_built",
                 turn_id=turn_id,
@@ -322,12 +377,22 @@ class DialogueController:
                 },
                 character_id=active_character_id,
             )
+            self._record_prompt_run(
+                turn_id=turn_id,
+                turn_input=turn_input,
+                active_character_id=active_character_id,
+                prompt_messages=prompt_messages,
+                prompt_context_metadata=prompt_context_metadata,
+                sections=prompt_sections,
+                response=response,
+                warnings=warnings,
+                status="completed",
+            )
 
             return AgentTurnOutput(
                 turn_id=turn_id,
                 session_id=turn_input.session_id,
                 response=response,
-                response_mode=response_mode,
                 used_memory_ids=[m.id for m in retrieved_memories],
                 state_delta=state_delta,
                 warnings=warnings,
@@ -351,4 +416,22 @@ class DialogueController:
                 level="error",
                 character_id=active_character_id,
             )
+            if (
+                prompt_messages is not None
+                and prompt_context_metadata is not None
+                and prompt_sections is not None
+            ):
+                self._record_prompt_run(
+                    turn_id=turn_id,
+                    turn_input=turn_input,
+                    active_character_id=active_character_id,
+                    prompt_messages=prompt_messages,
+                    prompt_context_metadata=prompt_context_metadata,
+                    sections=prompt_sections,
+                    response=response,
+                    warnings=warnings,
+                    status="failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
             raise

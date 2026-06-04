@@ -4,8 +4,8 @@ from app.schemas import AgentTurnInput
 from app.utils.ids import new_id
 
 
-def test_memory_recall_uses_previous_written_memory(controller_and_store):
-    controller, store, settings = controller_and_store
+def test_memory_recall_uses_previous_written_memory(long_term_memory_controller_and_store):
+    controller, store, settings = long_term_memory_controller_and_store
     session_id = new_id("session")
 
     controller.handle_user_message(
@@ -32,4 +32,3 @@ def test_memory_recall_uses_previous_written_memory(controller_and_store):
 
     memories = store.list_active_memories(user_id=settings.default_user_id)
     assert max(memory.use_count for memory in memories) >= 1
-
