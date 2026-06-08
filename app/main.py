@@ -14,8 +14,11 @@ from app.memory.disabled import (
     DisabledMemoryWriteClassifier,
     DisabledMemoryWriter,
 )
+from app.memory.extractor import MemoryExtractionService
+from app.memory.mock_extractor import MockMemoryExtractionModelClient
 from app.memory.reader import MemoryReader
-from app.memory.writer import MemoryWriter
+from app.memory.runtime import build_memory_embedding_provider
+from app.memory.writer import QueuedMemoryWriter
 from app.model.deepseek import DeepSeekClient, FallbackChatModelClient
 from app.model.mock import MockChatModelClient
 from app.observability.noop import NoopPromptRunLogger, NoopTraceLogger
@@ -45,9 +48,28 @@ def build_controller(
             fallback=MockChatModelClient(),
         )
 
+    memory_extraction_service = None
     if settings.enable_long_term_memory:
-        memory_reader = MemoryReader(store)
-        memory_writer = MemoryWriter(store)
+        memory_embedding_provider = build_memory_embedding_provider(settings)
+        extraction_model = (
+            MockMemoryExtractionModelClient() if settings.use_mock_llm else chat_model
+        )
+        memory_extraction_service = MemoryExtractionService(
+            store=store,
+            model_client=extraction_model,
+            embedding_provider=memory_embedding_provider,
+        )
+        memory_reader = MemoryReader(
+            store,
+            embedding_provider=memory_embedding_provider,
+            recall_top_k=settings.memory_recall_top_k,
+            recall_threshold=settings.memory_recall_threshold,
+        )
+        memory_writer = QueuedMemoryWriter(
+            store,
+            window_size=settings.memory_window_size,
+            enable_window_extraction=settings.enable_memory_window_extraction,
+        )
         memory_write_classifier = MemoryWriteClassifier()
     else:
         memory_reader = DisabledMemoryReader()
@@ -61,6 +83,7 @@ def build_controller(
         prompt_run_logger = NoopPromptRunLogger()
     controller = DialogueController(
         settings=settings,
+        session_store=store,
         message_store=store,
         relationship_store=store,
         memory_reader=memory_reader,
@@ -77,5 +100,9 @@ def build_controller(
         trace_logger=NoopTraceLogger(),
         prompt_run_logger=prompt_run_logger,
     )
-    memory_admin = MemoryAdminService(store)
+    memory_admin = MemoryAdminService(
+        store,
+        session_store=store,
+        extraction_service=memory_extraction_service,
+    )
     return controller, memory_admin, settings, store

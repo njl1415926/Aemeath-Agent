@@ -573,27 +573,80 @@ Owner:
 
 ### T-0112 Session Contract
 
-状态：`todo`
+状态：`done`
 
 目标：
 
-- 在 Web UI / API Server 前定义一等 Session 对象。
+- 在 Web UI / API Server 和 Memory scope 扩展前定义一等 Session 对象。
+- 为 message history、memory extraction、prompt log 和未来 checkpoint 提供稳定归属。
 
 建议 owner：
 
-- Runtime / API worker session
+- Worker Session 4: Runtime / Session
 
 建议范围：
 
-- `app/schemas.py`
+- 新增 `app/session/*`
+- `app/agent/dialogue_controller.py`
 - `app/agent/message_store.py`
 - `app/db/schema.sql`
 - `app/db/sqlite_store.py`
+- `app/main.py`
+- `app/cli.py`
+- `tests/*`
+
+接口约束：
+
+- 遵守 `docs/session_contract.md`。
+- `session_id` 是全局唯一主键；`user_id` 和 `character_id` 是不可变归属字段。
+- `AgentTurnInput` v0.1 保持兼容，不改成嵌套 Session 对象。
+- Controller 只调用 `SessionStorePort.ensure_session(...)` 做编排，不实现归属策略。
+- Session 生命周期为 `active | ended | archived`；ended 只能显式 resume，archived
+  在 v0.1 不可恢复。
+- CLI 切换当前 session 不等于结束 session；`/session new` 不隐式结束旧 session。
+- `message_count` 与 `last_message_at` 是 Session read-model 字段，v0.1 SQLite
+  从 messages 精确聚合，不由 Controller 维护计数。
+- Session 不替代 Memory；`session_id` 默认是来源和窗口，不是全部长期记忆的隔离键。
+- Worker 不修改 Memory v0.3 的提炼、embedding 或召回策略。
+- Worker 不直接修改 manager-owned 架构文档；通过交付报告提出必要变更。
 
 验收标准：
 
-- 支持 session list / resume。
-- Session 使用 `session_id + user_id + character_id` 明确归属。
+- 支持 session create / current / list / end / resume / archive。
+- 同一 `session_id` 不能被其他 user 或 character 复用。
+- resume 后能够读取之前的 message history。
+- ended/archived session 的隐式 turn 被拒绝且无消息、日志或 memory job 副作用。
+- Session read model 返回准确的 message count 与 last-message time。
+- 当前直接构造 `AgentTurnInput` 的调用通过 `ensure_session` 保持兼容。
+- 旧数据库能够幂等回填 sessions，不丢失 messages。
+- Memory extraction jobs 继续使用一致的 `session_id + user_id + character_id`。
+- 新增最小测试，`pytest` 与 `ruff check .` 通过。
+
+前置设计：
+
+- `docs/session_contract.md`
+
+交付要求：
+
+- 先提交设计核对，不立即实现。
+- 实现完成后写入
+  `docs/agents_communication/session_v0_1_delivery.md`。
+
+实现摘要：
+
+- 新增一等 `SessionRecord` 与 `SessionStorePort`。
+- 支持 `active | ended | archived` 生命周期以及 create/list/end/resume/archive。
+- Controller 在任何消息、prompt log、关系状态或 memory job 写入前校验 Session。
+- CLI 支持 `/session current|new|list|end|resume|archive`。
+- SQLite 幂等回填旧消息和 Memory job provenance。
+- `message_count`、`last_message_at` 由 messages 精确聚合。
+- 修复非默认角色 Session 写入消息后重启被误判为 legacy `aemeath` 的问题。
+
+验收结果：
+
+- `pytest`：86 passed。
+- `ruff check .`：All checks passed。
+- Manager 手工验证非默认角色 Session 重启成功。
 
 ### T-0113 LangGraph Runtime Spike / Migration
 
@@ -698,7 +751,7 @@ Owner:
 
 ### T-0106 编码与中文规则测试
 
-状态：`todo`
+状态：`done`
 
 目标：
 
@@ -720,6 +773,17 @@ Owner:
 - 关键中文触发词测试通过。
 - 源文件以 UTF-8 保存。
 - 不改变现有公开接口。
+
+实现摘要：
+
+- 新增 `tests/test_chinese_encoding_and_behavior.py`。
+- 自动扫描源码、测试和文档中的常见 UTF-8-as-GBK mojibake 片段。
+- 增加 Mock model、memory classifier、state classifier 的中文行为测试。
+- 新增 `docs/encoding_policy.md`，记录 Windows 控制台显示乱码与真实文件编码的区分方法。
+
+验收结果：
+
+- `pytest tests/test_chinese_encoding_and_behavior.py`：4 passed。
 
 ### T-0107 Tool Calling & MCP Adapter
 
@@ -881,11 +945,12 @@ Validation:
 
 ### T-0120 Memory v0.3 Explicit Long-term Memory
 
-Status: `todo`
+Status: `done`
 
 Goal:
-- Implement a conservative long-term memory path after the prompt debug loop is usable.
-- Start with explicit user requests such as "remember ..." rather than broad automatic memory.
+- Implement an LLM-extracted long-term memory path after the prompt debug loop is usable.
+- Support explicit remember triggers, 12-message window extraction jobs, and manual CLI extraction.
+- Store each long-term memory as a vector-indexed chunk for active recall.
 - Keep recent conversation as the short-term baseline.
 
 Suggested owner:
@@ -896,6 +961,11 @@ Suggested scope:
 - `app/memory/writer.py`
 - `app/memory/reader.py`
 - `app/agent/dialogue_controller.py`
+- `app/memory/extractor.py`
+- `app/memory/worker.py`
+- `app/db/sqlite_store.py`
+- `app/db/schema.sql`
+- `app/cli.py`
 - `tests/*`
 
 Interface constraints:
@@ -904,8 +974,75 @@ Interface constraints:
 - Log injected memory ids through prompt run logs for debugging.
 
 Acceptance:
-- Explicit remember input writes one long-term memory when long-term memory is enabled.
-- Later recall can retrieve that memory.
+- Explicit remember input enqueues an idempotent memory extraction job when long-term memory is
+  enabled.
+- The standalone memory worker can process pending jobs into long-term memories and embeddings.
+- A 12-message session window enqueues one idempotent window extraction job.
+- Manual `/memory extract [limit]` can synchronously extract recent session messages.
+- Later turns actively retrieve vector-indexed long-term memories.
 - Minimal runtime with long-term memory disabled still does not write long-term memory.
+- Prompt run logs include injected `memory_ids`.
 - `pytest`
 - `ruff check .`
+
+Implementation summary:
+- Added `memory_extraction_jobs` and `long_term_memory_embeddings` SQLite tables.
+- Added idempotent job enqueue / claim / complete / fail operations.
+- Added `MemoryExtractionService` with Chinese JSON-only DeepSeek extraction prompt.
+- Added `QueuedMemoryWriter` for hard-trigger and 12-message window jobs.
+- Upgraded `MemoryReader` to active embedding recall when an embedding provider is configured.
+- Added `python -m app.memory.worker` for standalone job processing.
+- Added CLI `/memory extract [limit]` and `/memory debug on|off`.
+- Extended `AgentTurnOutput` with `used_memories` summaries while keeping `used_memory_ids`.
+- Default memory embedding provider is `hash`; `bge-m3` is explicit advanced configuration.
+- Mock LLM mode uses a JSON memory extraction mock so `/memory extract` remains stable.
+- CLI memory command branch catches exceptions and prints a non-fatal memory error.
+- `docs/architecture.md` and `docs/interfaces.md` document Memory v0.3 runtime contracts.
+- Session follow-up adds `SessionStorePort.require_session(...)` for read-only ownership checks.
+- Long-term memory now separates `scope_*` visibility fields from `source_*` provenance fields.
+- Keyword recall, vector recall, and fallback share one scope visibility predicate.
+- Exact dedupe matches only the target scope tuple.
+- Existing memories migrate transactionally and once-only to `user_global` through
+  `memory_scope_provenance_v1`.
+- Memory Admin extract/delete/disable paths enforce Session or memory ownership.
+
+Validation:
+- `pytest`: 95 passed
+- `ruff check .`: All checks passed
+
+### T-0121 v0.3 Release Closure
+
+Status: `done`
+
+Owner:
+- Manager Session
+
+Summary:
+- Align package and README version metadata with v0.3.
+- Add changelog and detailed migration/release notes.
+- Confirm user-visible CLI UTF-8 text and extend the mojibake encoding guard.
+- Run full tests, lint, diff checks, and a mock CLI smoke test.
+- Commit and publish the `release/v0.3` branch and `v0.3` tag.
+
+Key files:
+- `README.md`
+- `CHANGELOG.md`
+- `docs/releases/v0.3.md`
+- `pyproject.toml`
+- `app/cli.py`
+- `tests/test_chinese_encoding_and_behavior.py`
+
+Acceptance:
+- Release docs accurately describe Session v0.1 and Memory v0.3 behavior.
+- Upgrade notes explain database backup and automatic migrations.
+- No private source documents, local databases, prompt logs, or API keys are committed.
+- `pytest`
+- `ruff check .`
+
+Validation:
+- `pytest`: 95 passed
+- `ruff check .`: All checks passed
+- `python -m compileall -q app`
+- Mock CLI startup, Session creation, and `/exit` smoke test passed with a temporary database.
+- Disabled long-term-memory worker exits cleanly.
+- Git ignored-file and credential-pattern checks found no release-blocking files or secrets.

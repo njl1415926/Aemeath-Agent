@@ -1,5 +1,58 @@
 # Aemeath Agent Architecture
 
+## 2026-06-08 v0.3 Release Baseline
+
+v0.3 keeps `DialogueController` as an orchestration layer and promotes Session and
+long-term Memory to explicit runtime systems:
+
+```text
+CLI / future API
+  -> SessionStorePort
+  -> DialogueController
+       -> CharacterProviderPort
+       -> MemoryReaderPort / MemoryWriterPort
+       -> EvidenceProviderPort
+       -> ContextBuilderPort
+       -> ResponseGeneratorPort
+       -> StateUpdaterPort
+       -> MessageStore
+```
+
+Session provides stable ownership, lifecycle, and provenance. Memory independently decides
+visibility through `user_global`, `character`, and `session` scopes. Extraction jobs and
+embeddings are implementation details behind Memory ports; RAG remains behind
+`EvidenceProviderPort`. This keeps later API, tool, MCP, or LangGraph adapters from becoming
+business-policy owners.
+
+## 2026-06-08 Manager Update: Session Contract v0.1
+
+Session is promoted from a transient string to a first-class runtime object. The stable identity
+is a globally unique `session_id`; `user_id` and `character_id` define ownership and filtering.
+A v0.1 session belongs to exactly one user and one character.
+
+The planned runtime boundary is:
+
+```text
+CLI / API
+  -> SessionStorePort.create/get/list/end/resume/archive
+  -> AgentTurnInput(session_id, user_id, character_id)
+  -> DialogueController
+  -> SessionStorePort.ensure_session
+  -> MessageStore / Memory / RAG / Model
+```
+
+Session owns dialogue continuity and provenance. It does not replace memory. Long-term memory may
+use `session_id` as source provenance while retaining user-global or character-scoped retrieval.
+Session lifecycle is `active -> ended -> active` or `active/ended -> archived`. `ended` requires
+an explicit resume; archived sessions cannot be resumed in v0.1. CLI selection is not lifecycle:
+creating or selecting another session does not implicitly end the previous one.
+
+`message_count` and `last_message_at` belong to the Session read model. The v0.1 SQLite adapter
+computes them from `messages`, avoiding a hidden transaction dependency between `MessageStore`
+and `SessionStorePort`. A future storage adapter may materialize the projection without changing
+the public contract.
+The decision-complete contract is maintained in `docs/session_contract.md`.
+
 ## 2026-06-04 Manager Update: Prompt Assembly And JSONL Logs
 
 Prompt assembly now keeps a stable section order:
@@ -43,9 +96,9 @@ DialogueController
 
 本文档描述 Aemeath Agent 当前架构、模块边界和后续扩展方向。它是 manager session 分配任务和审查实现的主要依据。
 
-## 当前目标
+## 当前运行基线
 
-v0.1 的目标是跑通一个最小但可扩展的角色对话闭环：
+v0.3 已跑通一个最小但可扩展的角色对话闭环：
 
 1. CLI 接收用户输入。
 2. Dialogue Controller 编排一次 turn。
@@ -55,7 +108,8 @@ v0.1 的目标是跑通一个最小但可扩展的角色对话闭环：
 6. Context Builder 组装 prompt。
 7. Model Client 生成回复。
 8. State Updater 更新关系 / 情绪状态。
-9. Memory Writer 写入长期记忆。
+9. Memory Writer 按配置提交长期记忆提炼任务。
+10. Session Store 验证会话归属、状态并提供消息统计。
 
 ## 高层数据流
 
@@ -207,6 +261,8 @@ disabled RAG runs, but it is no longer the default provider in `app/main.py`.
 - `app/memory/classifier.py`
 - `app/memory/admin.py`
 - `app/memory/disabled.py`
+- `app/memory/extractor.py`
+- `app/memory/worker.py`
 
 职责：
 
@@ -223,11 +279,36 @@ v0.2 minimal runtime 默认使用 recent conversation 作为 memory baseline，�
 `MemoryReaderPort` / `MemoryWriterPort` / `MemoryWriteClassifierPort`，不承担长期记忆策略判断。
 `MemoryAdminService` 仍保留对已有长期记忆的管理能力。
 
+v0.3 long-term memory runtime 在显式开启 `AEMEATH_ENABLE_LONG_TERM_MEMORY=true` 后启用：
+
+- `MemoryWriteClassifier` 识别显式记忆触发词。
+- `QueuedMemoryWriter` 将 hard trigger 和 12-message window 写入
+  `memory_extraction_jobs`，使用 `idempotency_key` 防止重复 job。
+- 独立进程 `python -m app.memory.worker` 领取 pending job，调用
+  `MemoryExtractionService` 使用 DeepSeek / mock extraction client 提炼 JSON memories。
+- 提炼出的 memory 写入 `long_term_memories`，embedding 写入
+  `long_term_memory_embeddings`。
+- `MemoryReader` 在每轮对话中主动通过 embedding 检索长期记忆，结果进入
+  `ContextBuilder.long_term_memories` 和 prompt run log 的 `memory_ids`。
+- 长期记忆的作用域与来源分离：
+  - `scope + scope_character_id + scope_session_id` 决定召回可见性；
+  - `source_session_id + source_job_id + source_message_ids_json` 只记录来源。
+- 关键词、向量和 fallback 统一使用 Memory Store 内部的召回 scope predicate。
+- 精确去重按目标 scope tuple 匹配，不由当前对话可见的其他 scope memory 抑制写入。
+- 旧长期记忆通过版本化事务迁移为 `user_global`，保持原有跨 Session 行为。
+- CLI 支持 `/memory extract [limit]` 同步提炼当前 session 最近消息，支持
+  `/memory debug on|off` 显示本轮召回内容。
+
+默认 `AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash`，保证基础安装打开长期记忆不会依赖
+`torch` / `transformers`。真实语义召回可显式设置为 `bge-m3` 并提供本地模型路径。
+
 当前边界约定：
 
 - Interaction memory 走 `MemoryReaderPort`。
 - Canon / lore / voice evidence 走 `EvidenceProviderPort`。
 - `MemoryQuery` / `MemorySearchResult` 是后续 filter、评分、解释和 trace 的稳定输入输出对象。
+- Memory Admin 在读取 Session 消息前通过 `SessionStorePort.require_session(...)` 校验
+  `session_id + user_id + character_id`；删除和禁用 memory 使用 owner-scoped 原子更新。
 
 ### State Layer
 

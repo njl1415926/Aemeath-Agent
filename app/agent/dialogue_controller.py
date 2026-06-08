@@ -18,7 +18,8 @@ from app.memory.schemas import MemoryQuery
 from app.observability.ports import PromptRunLoggerPort, TraceLoggerPort
 from app.observability.schemas import ConversationRun, PromptRunRecord, TraceEvent
 from app.retrieval.ports import EvidenceProviderPort
-from app.schemas import AgentTurnInput, AgentTurnOutput
+from app.schemas import AgentTurnInput, AgentTurnOutput, UsedMemory
+from app.session.ports import SessionStorePort
 from app.state.store import RelationshipStore
 from app.utils.ids import new_id, utc_now
 
@@ -39,6 +40,7 @@ class DialogueController:
         self,
         *,
         settings: Settings,
+        session_store: SessionStorePort,
         message_store: MessageStore,
         relationship_store: RelationshipStore,
         memory_reader: MemoryReaderPort,
@@ -53,6 +55,7 @@ class DialogueController:
         prompt_run_logger: PromptRunLoggerPort,
     ):
         self.settings = settings
+        self.session_store = session_store
         self.message_store = message_store
         self.relationship_store = relationship_store
         self.memory_reader = memory_reader
@@ -168,6 +171,25 @@ class DialogueController:
             )
             warnings.append("character_id_unknown_using_default_profile")
         active_character_id = character_profile.character_id
+        try:
+            self.session_store.ensure_session(
+                session_id=turn_input.session_id,
+                user_id=turn_input.user_id,
+                character_id=active_character_id,
+            )
+        except Exception as exc:
+            self._record_trace(
+                event_type="session_validation_failed",
+                turn_id=turn_id,
+                turn_input=turn_input,
+                payload={
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                level="error",
+                character_id=active_character_id,
+            )
+            raise
         run = ConversationRun(
             turn_id=turn_id,
             user_id=turn_input.user_id,
@@ -227,6 +249,7 @@ class DialogueController:
                     user_id=turn_input.user_id,
                     query_text=turn_input.message,
                     character_id=active_character_id,
+                    session_id=turn_input.session_id,
                     limit=6,
                 )
             )
@@ -340,6 +363,13 @@ class DialogueController:
                 user_id=turn_input.user_id,
                 decision=memory_decision,
                 source_message_id=user_message_id,
+                session_id=turn_input.session_id,
+                character_id=active_character_id,
+            )
+            window_memory_job_id = self.memory_writer.enqueue_window_if_due(
+                user_id=turn_input.user_id,
+                session_id=turn_input.session_id,
+                character_id=active_character_id,
             )
 
             state_delta = {
@@ -357,6 +387,7 @@ class DialogueController:
                     "should_write": memory_decision.should_write,
                     "operation": memory_decision.operation,
                     "created_memory_id": created_memory_id,
+                    "window_memory_job_id": window_memory_job_id,
                     "reason": memory_decision.reason,
                 },
                 character_id=active_character_id,
@@ -396,6 +427,15 @@ class DialogueController:
                 used_memory_ids=[m.id for m in retrieved_memories],
                 state_delta=state_delta,
                 warnings=warnings,
+                used_memories=[
+                    UsedMemory(
+                        id=result.record.id,
+                        content=result.record.content,
+                        score=result.score,
+                        match_reason=result.match_reason,
+                    )
+                    for result in memory_results
+                ],
             )
         except Exception as exc:
             run.ended_at = utc_now()

@@ -17,6 +17,14 @@ class AgentTurnInput:
 
 
 @dataclass
+class UsedMemory:
+    id: str
+    content: str
+    score: float | None
+    match_reason: str
+
+
+@dataclass
 class AgentTurnOutput:
     turn_id: str
     session_id: str
@@ -24,6 +32,7 @@ class AgentTurnOutput:
     used_memory_ids: list[str]
     state_delta: dict[str, int]
     warnings: list[str] = field(default_factory=list)
+    used_memories: list[UsedMemory] = field(default_factory=list)
 
 
 @dataclass
@@ -98,3 +107,9 @@ class MemoryRecord:
     updated_at: str | None
     expiry: str | None
     is_active: int
+    scope: str = "user_global"
+    scope_character_id: str | None = None
+    scope_session_id: str | None = None
+    source_session_id: str | None = None
+    source_job_id: str | None = None
+    source_message_ids: list[str] = field(default_factory=list)
