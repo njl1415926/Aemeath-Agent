@@ -24,6 +24,8 @@ def settings(tmp_path: Path) -> Settings:
         prompt_template_path=Path("app/prompts/dialogue_prompt.v0.1.md"),
         enable_prompt_run_log=False,
         prompt_run_log_root=tmp_path / ".aemeath" / "sessions",
+        memory_embedding_provider="hash",
+        memory_vector_db_path=tmp_path / "aemeath_memory_test.sqlite",
     )
 
 

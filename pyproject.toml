@@ -1,10 +1,11 @@
 [project]
 name = "aemeath-agent"
-version = "0.2.0"
-description = "Aemeath Agent v0.2 CLI roleplay dialogue agent"
+version = "0.3.0"
+description = "Aemeath Agent v0.3 CLI roleplay dialogue agent"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "numpy>=1.26.0",
   "python-dotenv>=1.0.1",
   "PyYAML>=6.0.1",
 ]

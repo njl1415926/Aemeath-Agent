@@ -1,5 +1,44 @@
 # Aemeath Agent Interfaces
 
+## 2026-06-08 Manager Update: Session Contract v0.1
+
+The planned public session type is `SessionRecord`:
+
+```python
+@dataclass(frozen=True)
+class SessionRecord:
+    id: str
+    user_id: str
+    character_id: str
+    status: Literal["active", "ended", "archived"]
+    title: str | None
+    metadata: dict[str, Any]
+    created_at: str
+    updated_at: str
+    ended_at: str | None
+    archived_at: str | None
+    last_message_at: str | None
+    message_count: int
+```
+
+The stable persistence boundary is `SessionStorePort`, exposing:
+
+- `ensure_session(...)`
+- `create_session(...)`
+- `get_session(...)`
+- `list_sessions(...)`
+- `end_session(...)`
+- `resume_session(...)`
+- `archive_session(...)`
+
+`session_id` is the globally unique primary key. `user_id + character_id` is an ownership and
+filtering dimension, not a composite session ID. Existing `AgentTurnInput` remains compatible.
+Changing the CLI's currently selected session does not implicitly end the old session.
+`message_count` and `last_message_at` are read-model fields; the v0.1 SQLite adapter derives them
+from messages rather than requiring Controller-managed counters.
+Full semantics, migration rules, CLI commands, and the Memory boundary are defined in
+`docs/session_contract.md`.
+
 ## 2026-06-04 Manager Update: Prompt Run Logging
 
 Current runtime now exposes prompt-run logging as an observability port.
@@ -73,6 +112,14 @@ class AgentTurnInput:
 
 ```python
 @dataclass
+class UsedMemory:
+    id: str
+    content: str
+    score: float | None
+    match_reason: str
+
+
+@dataclass
 class AgentTurnOutput:
     turn_id: str
     session_id: str
@@ -80,13 +127,14 @@ class AgentTurnOutput:
     used_memory_ids: list[str]
     state_delta: dict[str, int]
     warnings: list[str] = field(default_factory=list)
+    used_memories: list[UsedMemory] = field(default_factory=list)
 ```
 
 含义：
 
 - `response`：模型或 fallback 生成的角色回复。
-- `response_mode`：本轮对话模式。
 - `used_memory_ids`：参与本轮上下文的长期记忆。
+- `used_memories`：CLI/debug 友好的长期记忆摘要，包含 id、内容、分数和匹配原因。
 - `state_delta`：关系状态变化。
 - `warnings`：非致命问题，例如记忆去重、模型 fallback。
 
@@ -113,6 +161,13 @@ class AgentTurnOutput:
 - `RelationshipStore`
 
 新增功能应优先实现这些 port，或在 manager session 评审后新增 port。
+
+v0.3 Memory 扩展说明：
+
+- `MemoryWriterPort.persist_decision(...)` 可接收可选 `session_id` 和 `character_id`，用于
+  memory layer 内部生成提炼 job 的幂等键。
+- `MemoryWriterPort.enqueue_window_if_due(...)` 由 controller 每轮固定调用，但窗口大小、
+  是否启用和是否创建 job 均由 memory writer 内部决定。
 
 ## Store Interfaces
 
@@ -468,6 +523,7 @@ class ChatModelClient(Protocol):
 - `user_id`
 - `query_text`
 - `character_id`
+- `session_id`（兼容旧调用可为空；Controller 必须传入已验证 Session ID）
 - `namespaces`
 - `memory_types`
 - `limit`
@@ -485,7 +541,78 @@ class ChatModelClient(Protocol):
 - Interaction memory 走 `MemoryReaderPort`。
 - Canon / lore / voice evidence 走 `EvidenceProviderPort`。
 - `EvidencePack.memory_results` 仅保留给未来统一检索聚合或外部 memory evidence，不应与当前 interaction memory read path 混用。
-- v0.1 仅支持 Aemeath 单角色记忆，`MemoryQuery.character_id` 先作为 trace / 未来过滤字段传递；真正按角色隔离 memory 由后续 namespace / schema 任务处理。
+- 对话召回按 `MemoryQuery.user_id + character_id + session_id` 计算 scope visibility。
+
+### Memory v0.3 Extraction And Vector Recall
+
+位置：
+
+- `app/memory/extractor.py`
+- `app/memory/writer.py`
+- `app/memory/reader.py`
+- `app/memory/worker.py`
+- `app/db/sqlite_store.py`
+
+新增持久化结构：
+
+- `memory_extraction_jobs`：长期记忆提炼 job queue，含 `idempotency_key`、
+  `status`、`trigger_type`、`source_message_ids_json`、`input_json`、`result_json`、
+  `error`、`attempt_count`、`locked_by`、`locked_at` 等字段。
+- `long_term_memory_embeddings`：每条长期记忆的 embedding，按 `memory_id` 主键并以
+  `user_id` 和所属 memory scope 过滤召回。
+- `long_term_memories` 增加 `scope`、`scope_character_id`、`scope_session_id`；
+  来源单独记录在 `source_session_id`、`source_job_id`、`source_message_ids_json`。
+- `schema_migrations` 记录一次性正式迁移；旧记忆迁为 `user_global`，保持跨 Session
+  召回行为。
+
+新增运行时能力：
+
+- `QueuedMemoryWriter.persist_decision(...)` 将显式记忆触发写为 `hard` job。
+- `QueuedMemoryWriter.enqueue_window_if_due(...)` 在当前 session 有至少
+  `AEMEATH_MEMORY_WINDOW_SIZE` 条未处理消息时写入 `window` job。
+- `MemoryExtractionService` 使用 `ChatModelClient` 输出 JSON memories，再写入
+  `long_term_memories` 和 `long_term_memory_embeddings`。
+- `MemoryReader` 在配置 embedding provider 后每轮主动向量召回，返回
+  `MemorySearchResult(match_reason="embedding_similarity")`。
+- 关键词召回、向量召回和 fallback 共享 scope visibility：
+  `user_global` 对同一用户可见，`character` 还需角色匹配，`session` 还需 Session 匹配。
+- 精确去重严格匹配待写入 memory 的
+  `scope + scope_character_id + scope_session_id`，不复用召回可见性。
+- `python -m app.memory.worker` 独立处理 pending jobs。
+
+配置：
+
+- `AEMEATH_ENABLE_LONG_TERM_MEMORY`
+- `AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash|bge-m3`
+- `AEMEATH_MEMORY_EMBEDDING_MODEL_PATH`
+- `AEMEATH_MEMORY_RECALL_TOP_K`
+- `AEMEATH_MEMORY_RECALL_THRESHOLD`
+- `AEMEATH_MEMORY_WORKER_POLL_INTERVAL_SECONDS`
+- `AEMEATH_MEMORY_WINDOW_SIZE`
+- `AEMEATH_ENABLE_MEMORY_WINDOW_EXTRACTION`
+
+默认 embedding provider 是 `hash`，用于基础安装和测试。真实语义召回需要显式设置
+`bge-m3` 并确保本地模型依赖可用。
+
+CLI 调试命令：
+
+- `/memory extract [limit]`：同步提炼当前 session 最近消息。
+- `/memory debug on|off`：显示或关闭本轮召回 memory 摘要。
+
+管理与权限：
+
+- `/memory extract` 通过 `SessionStorePort.require_session(...)` 校验 Session 所有权；
+  active、ended 可读取，archived 默认拒绝。
+- `/memory delete` 和 `/memory disable` 使用 `memory_id + user_id` 原子更新。
+- `/memory list` 是所有者管理视图；对话召回使用 `MemoryQuery` scope visibility，两者不共用
+  列表语义。
+
+边界：
+
+- `DialogueController` 仍只调用 memory ports。
+- Interaction memory 不进入 `EvidencePack.memory_results`。
+- 当前自动提炼仍创建 `user_global` memory。`character` / `session` scope 已具备存储和召回
+  契约，未来 scope classifier 另行设计。
 
 ## Observability Interfaces
 

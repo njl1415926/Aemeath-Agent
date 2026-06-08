@@ -4,12 +4,23 @@ import re
 
 from app.memory.schemas import MemoryQuery, MemorySearchResult
 from app.memory.store import MemoryStore
+from app.retrieval.embeddings import EmbeddingProviderPort
 from app.schemas import MemoryRecord
 
 
 class MemoryReader:
-    def __init__(self, store: MemoryStore):
+    def __init__(
+        self,
+        store: MemoryStore,
+        *,
+        embedding_provider: EmbeddingProviderPort | None = None,
+        recall_top_k: int = 4,
+        recall_threshold: float = 0.45,
+    ):
         self.store = store
+        self.embedding_provider = embedding_provider
+        self.recall_top_k = recall_top_k
+        self.recall_threshold = recall_threshold
 
     def _should_read(self, *, memory_query: MemoryQuery, tokens: list[str]) -> bool:
         if memory_query.reason in {"forced", "memory_focus"}:
@@ -45,11 +56,18 @@ class MemoryReader:
         return list(dict.fromkeys(chinese_tokens + ascii_tokens))
 
     def retrieve_query(self, *, memory_query: MemoryQuery) -> list[MemorySearchResult]:
+        if self.embedding_provider is not None:
+            return self._retrieve_embedding(memory_query=memory_query)
+        return self._retrieve_keyword(memory_query=memory_query)
+
+    def _retrieve_keyword(self, *, memory_query: MemoryQuery) -> list[MemorySearchResult]:
         tokens = self._extract_keywords(memory_query.query_text)
         if not self._should_read(memory_query=memory_query, tokens=tokens):
             return []
         memories = self.store.search_memories_keyword(
             user_id=memory_query.user_id,
+            character_id=memory_query.character_id,
+            session_id=memory_query.session_id,
             keywords=tokens,
             limit=memory_query.limit,
         )
@@ -62,8 +80,10 @@ class MemoryReader:
         if (not memories) and any(
             keyword in memory_query.query_text for keyword in recall_keywords
         ):
-            memories = self.store.list_active_memories(
+            memories = self.store.list_recallable_memories(
                 user_id=memory_query.user_id,
+                character_id=memory_query.character_id,
+                session_id=memory_query.session_id,
                 limit=memory_query.limit,
             )
         if memory_query.namespaces:
@@ -82,6 +102,47 @@ class MemoryReader:
             )
             for memory in memories
         ]
+
+    def _retrieve_embedding(self, *, memory_query: MemoryQuery) -> list[MemorySearchResult]:
+        tokens = self._extract_keywords(memory_query.query_text)
+        if not self._should_read(memory_query=memory_query, tokens=tokens):
+            return []
+        query_embedding = self.embedding_provider.embed_query(memory_query.query_text)
+        vector_results = self.store.search_memory_embeddings(
+            user_id=memory_query.user_id,
+            character_id=memory_query.character_id,
+            session_id=memory_query.session_id,
+            query_embedding=query_embedding,
+            limit=max(memory_query.limit, self.recall_top_k),
+            candidate_limit=max(self.recall_top_k * 4, self.recall_top_k + 8),
+        )
+        output: list[MemorySearchResult] = []
+        for item in vector_results:
+            if item.score < self.recall_threshold:
+                continue
+            memory = self.store.get_memory(memory_id=item.memory_id)
+            if memory is None or memory.status != "active" or not memory.is_active:
+                continue
+            if memory_query.namespaces and memory.namespace not in memory_query.namespaces:
+                continue
+            if memory_query.memory_types and memory.memory_type not in memory_query.memory_types:
+                continue
+            if (
+                memory_query.min_confidence is not None
+                and memory.confidence < memory_query.min_confidence
+            ):
+                continue
+            self.store.mark_memory_used(memory_id=memory.id)
+            output.append(
+                MemorySearchResult(
+                    record=memory,
+                    score=item.score,
+                    match_reason="embedding_similarity",
+                )
+            )
+            if len(output) >= self.recall_top_k:
+                break
+        return output
 
     def retrieve(self, *, user_id: str, query: str, limit: int = 8) -> list[MemoryRecord]:
         results = self.retrieve_query(

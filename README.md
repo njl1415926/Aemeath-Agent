@@ -1,17 +1,21 @@
 # Aemeath Agent
 
-Aemeath Agent v0.2 is a CLI roleplay dialogue agent based on Aemeath from
-Wuthering Waves. The current runtime focuses on a small but extensible loop:
-character context, World Info RAG, recent conversation memory, prompt assembly,
-DeepSeek-compatible model calls, and local prompt-run debugging logs.
+Aemeath Agent v0.3 is a CLI roleplay dialogue agent based on Aemeath from
+Wuthering Waves. The runtime now combines a composable Character system, World
+Info RAG, first-class Sessions, recent conversation, optional extracted
+long-term memory, DeepSeek-compatible model calls, and local prompt debugging.
 
-## v0.2 Features
+## v0.3 Features
 
 - CLI multi-turn dialogue.
 - Character v0.2 manifest loaded from `app/character/Aemeath.v0.2/`.
 - World Info keyword RAG through `WorldInfoEvidenceProvider`.
-- Recent conversation as the default minimal memory baseline.
-- Optional long-term memory behind `AEMEATH_ENABLE_LONG_TERM_MEMORY`.
+- First-class Session identity, ownership, lifecycle, and message statistics.
+- Recent conversation as the always-available short-term memory baseline.
+- Optional LLM-extracted long-term memory with explicit and window triggers.
+- Scope-aware memory recall: `user_global`, `character`, and `session`.
+- Hash embeddings by default, with optional local BGE-M3 embeddings.
+- Standalone memory extraction worker and manual extraction command.
 - Prompt context assembled as structured sections before model calls.
 - Local JSONL prompt-run logs under `.aemeath/sessions/`.
 - Prompt log inspector for debugging prompt, RAG, memory, and response behavior.
@@ -48,9 +52,17 @@ Useful CLI commands:
 ```text
 /help
 /exit
+/session current
+/session new
+/session list
+/session resume <session_id>
+/session end [session_id]
+/session archive [session_id]
 /memory list
 /memory delete <memory_id>
 /memory disable <memory_id>
+/memory extract [limit]
+/memory debug on|off
 ```
 
 ## DeepSeek Runtime
@@ -67,6 +79,33 @@ DEEPSEEK_REASONING_EFFORT=
 ```
 
 Do not commit `.env` or real API keys.
+
+## Long-term Memory
+
+Long-term memory is disabled by default. Enable the v0.3 runtime in `.env`:
+
+```env
+AEMEATH_ENABLE_LONG_TERM_MEMORY=true
+AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash
+```
+
+The deterministic hash provider has no additional model dependency and is
+appropriate for development. `bge-m3` is available as an opt-in local semantic
+embedding provider, but its model and runtime dependencies must be installed
+separately.
+
+The CLI can extract recent messages synchronously:
+
+```text
+/memory extract
+/memory extract 20
+```
+
+Queued extraction jobs are processed by a separate worker:
+
+```bash
+python -m app.memory.worker
+```
 
 ## Prompt Logs
 
@@ -95,7 +134,7 @@ Logs are local runtime data and are ignored by git.
 
 ## RAG And Data
 
-The active v0.2 runtime uses the curated World Info file:
+The active v0.3 runtime uses the curated World Info file:
 
 ```text
 app/retrieval/data/Aemeath_World_Info.json
@@ -106,6 +145,16 @@ of the release branch.
 
 Embedding RAG utilities exist under `app/retrieval/` and `scripts/`, but vector
 RAG is not the active provider in the main runtime yet.
+
+## Upgrading From v0.2
+
+Back up `data/aemeath.db` before first starting v0.3. SQLite initialization
+automatically creates Session records for legacy dialogue data and applies the
+versioned long-term-memory scope/provenance migration. Existing memories remain
+visible as `user_global` memories.
+
+Detailed release and migration notes are in
+[`docs/releases/v0.3.md`](docs/releases/v0.3.md).
 
 ## Tests
 
@@ -119,8 +168,8 @@ ruff check .
 Current release validation:
 
 ```text
-pytest
-ruff check .
+95 passed
+All checks passed
 ```
 
 ## Project Coordination

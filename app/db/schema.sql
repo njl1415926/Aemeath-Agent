@@ -12,9 +12,36 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session_created
     ON messages (session_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    character_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'ended', 'archived')),
+    title TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    ended_at TEXT,
+    archived_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_status_updated
+    ON sessions (user_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_character_status_updated
+    ON sessions (user_id, character_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS long_term_memories (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'user_global',
+    scope_character_id TEXT,
+    scope_session_id TEXT,
     namespace TEXT NOT NULL,
     memory_type TEXT NOT NULL,
     content TEXT NOT NULL,
@@ -22,6 +49,9 @@ CREATE TABLE IF NOT EXISTS long_term_memories (
     confidence REAL NOT NULL DEFAULT 1.0,
     source TEXT NOT NULL,
     source_message_id TEXT,
+    source_session_id TEXT,
+    source_job_id TEXT,
+    source_message_ids_json TEXT NOT NULL DEFAULT '[]',
     related_memory_ids TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'active',
@@ -36,6 +66,41 @@ CREATE TABLE IF NOT EXISTS long_term_memories (
 
 CREATE INDEX IF NOT EXISTS idx_memories_user_status
     ON long_term_memories (user_id, status, is_active, importance DESC);
+
+CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
+    id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    character_id TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source_message_ids_json TEXT NOT NULL,
+    input_json TEXT NOT NULL,
+    result_json TEXT,
+    error TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    locked_by TEXT,
+    locked_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_status_created
+    ON memory_extraction_jobs (status, created_at);
+
+CREATE TABLE IF NOT EXISTS long_term_memory_embeddings (
+    memory_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    embedding_model TEXT NOT NULL,
+    vector_dim INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_embeddings_user
+    ON long_term_memory_embeddings (user_id);
 
 CREATE TABLE IF NOT EXISTS relationship_states (
     id TEXT PRIMARY KEY,

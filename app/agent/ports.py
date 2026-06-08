@@ -38,6 +38,17 @@ class MemoryWriterPort(Protocol):
         user_id: str,
         decision: MemoryDecision,
         source_message_id: str | None = None,
+        session_id: str,
+        character_id: str,
+    ) -> str | None:
+        ...
+
+    def enqueue_window_if_due(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        character_id: str,
     ) -> str | None:
         ...
 
