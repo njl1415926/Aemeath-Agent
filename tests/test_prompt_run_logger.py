@@ -4,10 +4,17 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from app.observability.prompt_run_logger import JsonlPromptRunLogger
 from app.observability.schemas import PromptRunRecord
 from app.schemas import AgentTurnInput
 from app.utils.ids import new_id
+
+
+class _FailingResponseGenerator:
+    def generate(self, *, messages, user_input, retrieved_memories):
+        raise ValueError("provider failed token=secret123 x-api-key=secret456")
 
 
 def test_jsonl_prompt_run_logger_writes_utf8_record(tmp_path: Path):
@@ -93,3 +100,38 @@ def test_controller_does_not_create_prompt_log_when_disabled(controller_and_stor
     )
 
     assert not settings.prompt_run_log_root.exists()
+
+
+def test_controller_failed_prompt_run_log_contains_safe_error_fields(settings):
+    settings = replace(
+        settings,
+        enable_prompt_run_log=True,
+        prompt_run_log_root=settings.db_path.parent / ".aemeath" / "sessions",
+    )
+    from app.main import build_controller
+
+    controller, _memory_admin, resolved_settings, _store = build_controller(settings=settings)
+    controller.response_generator = _FailingResponseGenerator()
+
+    with pytest.raises(ValueError):
+        controller.handle_user_message(
+            AgentTurnInput(
+                user_id=resolved_settings.default_user_id,
+                session_id=new_id("session"),
+                character_id=resolved_settings.default_character_id,
+                message="fail after prompt",
+                metadata={"authorization": "Bearer real-token"},
+            )
+        )
+
+    [log_file] = list(resolved_settings.prompt_run_log_root.glob("*/*/*/*.jsonl"))
+    record = json.loads(log_file.read_text(encoding="utf-8"))
+
+    assert record["status"] == "failed"
+    assert record["error_code"] == "INVALID_INPUT"
+    assert record["error_type"] == "ValueError"
+    assert record["error_public_message"] == "Invalid input."
+    assert record["error"]
+    assert "secret123" not in record["error"]
+    assert "secret456" not in record["error"]
+    assert "real-token" not in json.dumps(record, ensure_ascii=False)

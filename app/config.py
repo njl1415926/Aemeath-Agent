@@ -26,6 +26,10 @@ class Settings:
     enable_long_term_memory: bool = False
     enable_prompt_run_log: bool = True
     prompt_run_log_root: Path = Path(".aemeath/sessions")
+    enable_trace_log: bool = False
+    trace_log_root: Path = Path(".aemeath/traces")
+    enable_app_log: bool = False
+    app_log_root: Path = Path(".aemeath/app_logs")
     memory_embedding_provider: str = "hash"
     memory_embedding_model_path: Path = Path(".cache/huggingface/BAAI/bge-m3")
     memory_vector_db_path: Path = Path("data/aemeath_memory.sqlite")
@@ -36,6 +40,8 @@ class Settings:
     enable_memory_window_extraction: bool = True
     default_user_id: str = "user_default"
     default_character_id: str = "aemeath"
+    dev_auth_token: str | None = None
+    dev_auth_user_id: str = "user_default"
 
     @staticmethod
     def from_env() -> "Settings":
@@ -72,6 +78,10 @@ class Settings:
             prompt_run_log_root=Path(
                 os.getenv("AEMEATH_PROMPT_RUN_LOG_ROOT", ".aemeath/sessions")
             ),
+            enable_trace_log=_parse_bool(os.getenv("AEMEATH_ENABLE_TRACE_LOG", "false")),
+            trace_log_root=Path(os.getenv("AEMEATH_TRACE_LOG_ROOT", ".aemeath/traces")),
+            enable_app_log=_parse_bool(os.getenv("AEMEATH_ENABLE_APP_LOG", "false")),
+            app_log_root=Path(os.getenv("AEMEATH_APP_LOG_ROOT", ".aemeath/app_logs")),
             memory_embedding_provider=os.getenv(
                 "AEMEATH_MEMORY_EMBEDDING_PROVIDER",
                 "hash",
@@ -100,6 +110,10 @@ class Settings:
             enable_memory_window_extraction=_parse_bool(
                 os.getenv("AEMEATH_ENABLE_MEMORY_WINDOW_EXTRACTION", "true")
             ),
+            default_user_id=os.getenv("AEMEATH_DEFAULT_USER_ID", "user_default"),
+            default_character_id=os.getenv("AEMEATH_DEFAULT_CHARACTER_ID", "aemeath"),
+            dev_auth_token=os.getenv("AEMEATH_DEV_AUTH_TOKEN") or None,
+            dev_auth_user_id=os.getenv("AEMEATH_DEV_AUTH_USER_ID", "user_default"),
         )
 
     def validate(self) -> None:

@@ -94,7 +94,9 @@ def format_prompt_run_record(
         lines.extend(
             [
                 "",
+                f"Error code: {record.get('error_code') or '(unknown)'}",
                 f"Error type: {record.get('error_type') or '(unknown)'}",
+                f"User message: {record.get('error_public_message') or '(none)'}",
                 f"Error: {record.get('error') or '(none)'}",
             ]
         )

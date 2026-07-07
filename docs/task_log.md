@@ -1046,3 +1046,347 @@ Validation:
 - Mock CLI startup, Session creation, and `/exit` smoke test passed with a temporary database.
 - Disabled long-term-memory worker exits cleanly.
 - Git ignored-file and credential-pattern checks found no release-blocking files or secrets.
+
+### T-0122 Audio / TTS Standalone Workspace Closure
+
+Status: `done`
+
+Owner:
+- Manager Session
+
+Summary:
+- Record the local GPT-SoVITS Audio workspace as a standalone experimental module.
+- Explicitly keep Audio out of the current Agent runtime flow.
+- Document the future `TextToSpeechPort` / `AudioOutputPort` direction without implementing it.
+- Ignore the local Audio workspace so model weights, source audio, training caches, runtime
+  vendor files, archives, scripts, and generated outputs are not accidentally committed while
+  Audio remains out of the runtime.
+
+Key files:
+- `.gitignore`
+- `docs/audio_module.md`
+- `docs/architecture.md`
+- `docs/interfaces.md`
+
+Current decision:
+- Text Agent remains deployable without GPU.
+- `Aemeath_roleplay_skill/audio/` is retained as local-only GPT-SoVITS work, but not wired into
+  `DialogueController`, CLI, API, Prompt, Memory, RAG, or Session.
+- Server deployment should treat TTS as optional, preferably through a separate GPU-backed service
+  or adapter.
+
+Validation:
+- Documentation-only architecture update.
+- No runtime code was changed.
+
+### T-0123 Error Handling v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 6
+- Manager Session review
+
+Summary:
+- Added a shared error handling layer under `app/errors/`.
+- Added stable `ErrorCode`, `ErrorInfo`, `AemeathError`, exception mapping, HTTP status mapping,
+  and sensitive-value sanitization.
+- Integrated structured error mapping with `DialogueController`, CLI output, DeepSeek retry
+  handling, prompt-run failed records, and prompt log inspection.
+- Kept Service/API/Auth/Structured Logging out of this scope.
+
+Key files:
+- `app/errors/`
+- `app/agent/dialogue_controller.py`
+- `app/cli.py`
+- `app/model/deepseek.py`
+- `app/observability/prompt_log_inspector.py`
+- `app/observability/schemas.py`
+- `docs/error_handling.md`
+- `docs/agents_communication/error_handling_v0_1_delivery.md`
+- `tests/test_errors.py`
+- `tests/test_cli_errors.py`
+- `tests/test_prompt_run_logger.py`
+- `tests/test_deepseek_client.py`
+
+Interface notes:
+- Future API/service layers should reuse `map_exception()`, `ErrorInfo.to_public_dict()`, and
+  `http_status_for_error()` instead of inventing separate error response rules.
+- Runtime logs and prompt-run records must pass error payloads through the sanitizer before
+  persistence.
+- The sanitizer covers common API key variants such as `api-key`, `x-api-key`, and `x_api_key`,
+  while avoiding broad false positives such as `ordinary-key`.
+
+Manager review follow-up:
+- Added tests for hyphenated API key redaction.
+- Added failed prompt-run regression coverage.
+- Added CLI normal-turn failure coverage for stable `[SESSION_ENDED]` output.
+
+Validation:
+- `pytest`: 105 passed
+- `ruff check .`: All checks passed
+- `python -m compileall -q app`: passed
+
+### T-0124 Observability And Structured Logging v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session: Observability And Structured Logging
+- Manager Session review
+
+Goal:
+- Turn the existing observability ports into a minimal production-friendly logging baseline.
+- Keep app logs, trace logs, and prompt-run logs clearly separated.
+- Reuse the Error Handling sanitizer and error mapping instead of creating a second error
+  taxonomy.
+
+Planned scope:
+- Add or refine structured app log schemas and ports.
+- Add a JSONL trace logger implementation for existing `TraceLoggerPort`.
+- Add runtime configuration for enabling/disabling structured logs and choosing local log roots.
+- Wire the default runtime to the new trace logger when enabled; keep noop implementations for
+  tests and disabled logging.
+- Add tests for JSONL trace/app log records, sensitive-value redaction, failed-turn error fields,
+  and prompt-run log compatibility.
+
+Out of scope:
+- FastAPI, Web UI, Auth, Service Layer, OpenTelemetry, cloud log shipping, and log query UI.
+- Changing prompt-run logs into the general trace system.
+- Persisting full system prompts or raw provider responses in trace/app logs by default.
+
+Key files:
+- `app/observability/`
+- `app/errors/`
+- `app/config.py`
+- `app/main.py`
+- `app/agent/dialogue_controller.py`
+- `app/memory/worker.py`
+- `scripts/inspect_prompt_log.py`
+- `docs/observability.md`
+- `docs/architecture.md`
+- `docs/interfaces.md`
+- `tests/`
+
+Acceptance:
+- Worker first submits a short design summary before implementation.
+- App log, trace log, and prompt-run log boundaries are documented.
+- JSONL trace/app logs use UTF-8 and `ensure_ascii=False`.
+- Sensitive keys and text fragments are redacted using `app/errors/sanitizer.py`.
+- Existing prompt-run logger and inspector tests still pass.
+- `pytest`
+- `ruff check .`
+
+Implementation summary:
+- Added `AppLogRecord` and `AppLoggerPort`.
+- Added `JsonlAppLogger` and `NoopAppLogger` as the minimal app/process logging contract.
+- Added `JsonlTraceLogger` for existing `TraceLoggerPort`.
+- Added trace/app log configuration:
+  - `AEMEATH_ENABLE_TRACE_LOG=false`
+  - `AEMEATH_TRACE_LOG_ROOT=.aemeath/traces`
+  - `AEMEATH_ENABLE_APP_LOG=false`
+  - `AEMEATH_APP_LOG_ROOT=.aemeath/app_logs`
+- Wired `app/main.py` to use `JsonlTraceLogger` when trace logging is enabled.
+- Kept prompt-run logging separate and unchanged.
+- Kept `AppLoggerPort` out of `DialogueController`; app logs remain for CLI/API/service/worker
+  boundaries.
+- Added focused tests for UTF-8 JSONL, `ensure_ascii=False`, redaction, enabled trace events,
+  failed-turn error trace data, and disabled trace logging.
+
+Manager acceptance:
+- Accepted on 2026-07-06.
+- No blocking issues found.
+- App Log, Trace Log, and Prompt Log boundaries remain separate.
+- `AppLoggerPort` is intentionally not injected into `DialogueController` in v0.1.
+- Future Service/API/Worker Operations work may reuse `AppLoggerPort` at process and boundary
+  layers.
+
+Validation:
+- `pytest`: 110 passed
+- `ruff check .`: All checks passed
+- `python -m compileall -q app tests`: passed
+- `git diff --check`: no whitespace errors, CRLF warnings only
+
+### T-0125 Agent Service Layer v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 8: Service Layer
+- Manager Session review
+
+Goal:
+- Insert a stable application service boundary between CLI / future API / Web adapters and
+  `DialogueController`.
+- Give future Auth, FastAPI, Web, Streaming, Audio, and App Logging work a single integration
+  point instead of letting them call the controller directly.
+- Keep `DialogueController` as an orchestration layer and avoid moving Character, Memory, RAG,
+  Prompt, Model, or State business policy into service code.
+
+Planned scope:
+- Add `app/services/` with minimal schemas and `AgentService`.
+- Define `UserContext` as the future Auth insertion point.
+- Define chat request/response DTOs around the existing `AgentTurnInput` / `AgentTurnOutput`.
+- Decide, with manager approval, whether service methods return a structured `Result` object or
+  raise mapped exceptions for adapter layers to present.
+- Optionally add a thin `SessionService` if it removes CLI/session command coupling without
+  expanding into a full account or permission system.
+- Optionally migrate CLI normal chat to `AgentService` if behavior remains unchanged and file
+  churn stays small.
+- Reuse `app/errors` for error mapping and `app/observability` ports where appropriate.
+
+Out of scope:
+- Account registration/login.
+- Token, cookie, OAuth, or password flows.
+- Full owner-only permission model.
+- FastAPI, Web UI, streaming API, SSE, WebSocket, and Audio output.
+- Rewriting `DialogueController` or module business logic.
+- Changing prompt assembly, memory policy, RAG policy, character behavior, or model provider
+  logic.
+
+Key files:
+- `app/services/`
+- `app/main.py`
+- `app/cli.py`
+- `app/schemas.py`
+- `app/errors/`
+- `app/observability/`
+- `app/session/`
+- `docs/session_contract.md`
+- `docs/error_handling.md`
+- `docs/observability.md`
+- `docs/architecture.md`
+- `docs/interfaces.md`
+- `tests/`
+
+Acceptance:
+- Worker first submits a short design proposal before implementation.
+- Service layer exposes stable DTOs and does not leak controller internals to future API/Web
+  adapters.
+- `UserContext` exists as a minimal future Auth insertion point.
+- Existing CLI behavior is unchanged if CLI is migrated.
+- Tests cover successful chat, session-ended failure, archived/invalid session behavior where
+  practical, unknown character fallback, and error mapping shape.
+- `DialogueController` remains orchestration-only.
+- `pytest`
+- `ruff check .`
+
+Implementation summary:
+- Added `app/services/` with `UserContext`, `ChatRequest`, `ChatResponse`,
+  `UsedMemorySummary`, and `AgentService`.
+- `AgentService.handle_chat(...)` returns `ChatResponse` on success and re-raises original
+  exceptions on failure; adapters continue to use `map_exception(exc)`.
+- Did not add `ServiceResult` / `ServiceError`.
+- Added `build_agent_service(...)` in `app/main.py`, preserving existing `build_controller(...)`.
+- Migrated only the CLI normal chat path to `AgentService`; `/session`, `/memory`, `/memory debug`,
+  and CLI session command helpers remain unchanged.
+- Deferred `SessionService`.
+- `AgentService` accepts `AppLoggerPort` and defaults to `NoopAppLogger`; service app logs record
+  summary fields only and do not include prompt text, model messages, user message text, provider
+  raw responses, or secrets.
+- Added service tests for successful chat, ended session failure, archived session failure,
+  unknown character fallback warning, error mapping, and app-log secret non-disclosure.
+
+Manager acceptance:
+- Accepted on 2026-07-06.
+- No blocking issues found.
+- `AgentService` remains a thin application boundary and does not absorb Character, Memory, RAG,
+  Prompt, Model, State, or Session policy.
+- `ChatResponse.character_id` as the requested target character is acceptable for v0.1; active
+  fallback character can be added later if API/Web needs it.
+- Keeping `build_controller(...)` and adding `build_agent_service(...)` is the right transition
+  shape while direct controller tests still exist.
+- CLI normal chat migration is accepted; `/session`, `/memory`, and `/memory debug` staying on the
+  old path is intentional.
+- `SessionService`, Auth, owner-only permissions, FastAPI, Web, Streaming, and Audio remain
+  deferred.
+
+Validation:
+- `pytest`: 115 passed
+- `ruff check .`: All checks passed
+- `python -m compileall -q app tests`: passed
+- `git diff --check`: no whitespace errors, CRLF warnings only
+
+### T-0126 Auth / Account System v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 9: Auth / Account System
+
+Goal:
+- Add a local account model and default account bootstrap.
+- Add optional dev/static token parsing that resolves to `UserContext`.
+- Add a minimal owner-only permission helper.
+- Keep Auth and permissions out of `DialogueController`.
+
+Scope:
+- Added `app/accounts/` with `AccountRecord`, `AccountStorePort`, and `AccountService`.
+- Added `app/auth/` with dev token hashing, `AuthService`, local default resolver, and auth
+  errors.
+- Added `app/permissions/` with `PermissionService.require_owner(...)`.
+- Added an `accounts` SQLite table and idempotent historical `user_id` backfill.
+- Added config:
+  - `AEMEATH_DEV_AUTH_TOKEN`
+  - `AEMEATH_DEV_AUTH_USER_ID`
+  - `AEMEATH_DEFAULT_USER_ID`
+  - `AEMEATH_DEFAULT_CHARACTER_ID`
+- Added error codes:
+  - `AUTH_REQUIRED`
+  - `AUTH_INVALID_CREDENTIALS`
+  - `AUTH_ACCOUNT_DISABLED`
+  - `PERMISSION_DENIED`
+
+Boundary:
+- CLI continues to use the default local account and user-visible behavior is unchanged.
+- `AgentService` trusts the supplied `UserContext`.
+- `AuthService` and account bootstrap handle account status and dev token resolution.
+- Session ownership failures continue to use `SESSION_OWNERSHIP_DENIED`.
+- Generic non-session owner-only failures use `PERMISSION_DENIED`.
+- Raw tokens, cookies, authorization headers, and passwords must not be logged or returned in
+  public errors.
+
+Key files:
+- `app/accounts/`
+- `app/auth/`
+- `app/permissions/`
+- `app/db/schema.sql`
+- `app/db/sqlite_store.py`
+- `app/config.py`
+- `app/main.py`
+- `app/errors/`
+- `docs/auth_and_permissions.md`
+- `tests/test_accounts.py`
+- `tests/test_auth.py`
+- `tests/test_permissions.py`
+
+Deferred:
+- FastAPI
+- Web UI
+- username/password login
+- password hashing
+- registration/login pages
+- OAuth
+- refresh tokens
+- cookie session
+- admin UI
+- complex RBAC
+- shared sessions
+- `DialogueController` auth changes
+
+Manager acceptance:
+- Accepted on 2026-07-07.
+- No blocking issues found.
+- Scope stayed within local accounts, default account bootstrap, optional dev/static token auth,
+  and minimal owner-only permission helper.
+- No username/password login, registration, FastAPI, Web, OAuth, refresh-token, cookie-session,
+  complex RBAC, or `DialogueController` auth flow was introduced.
+- `AgentService` continues to trust `UserContext`; account status and token resolution stay in
+  Auth/Account services.
+- Added `.env.example` entries for default identity and dev auth token settings.
+
+Validation:
+- `pytest`: 125 passed
+- `ruff check .`: All checks passed
+- `python -m compileall -q app tests`: passed
+- `git diff --check`: no whitespace errors, CRLF warnings only

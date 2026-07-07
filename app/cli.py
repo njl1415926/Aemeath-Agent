@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from app.main import build_controller
-from app.schemas import AgentTurnInput
+from app.errors import map_exception
+from app.main import build_agent_service
+from app.services.schemas import ChatRequest, UserContext
 from app.session.errors import SessionError
 from app.session.ports import SessionStorePort
 
@@ -135,7 +136,7 @@ def _handle_session_command(
 
 
 def run_cli() -> int:
-    controller, memory_admin, settings, store = build_controller()
+    agent_service, memory_admin, settings, store = build_agent_service()
     user_id = settings.default_user_id
     current_session = _new_cli_session(
         session_store=store,
@@ -174,7 +175,11 @@ def run_cli() -> int:
                     history_limit=settings.recent_message_limit,
                 )
             except SessionError as exc:
-                print(f"[session] command failed: {exc}")
+                error_info = map_exception(exc)
+                print(
+                    f"[session] command failed: {error_info.public_message} "
+                    f"[{error_info.code.value}]"
+                )
             continue
         if user_input.startswith("/memory debug"):
             parts = user_input.split()
@@ -196,18 +201,24 @@ def run_cli() -> int:
                     )
                 )
             except Exception as exc:  # noqa: BLE001
-                print(f"[memory] command failed: {exc}")
+                error_info = map_exception(exc)
+                print(
+                    f"[memory] command failed: {error_info.public_message} "
+                    f"[{error_info.code.value}]"
+                )
             continue
 
-        turn_input = AgentTurnInput(
-            user_id=user_id,
+        chat_request = ChatRequest(
             session_id=session_id,
             character_id=settings.default_character_id,
             message=user_input,
             metadata={"client": "cli"},
         )
         try:
-            output = controller.handle_user_message(turn_input)
+            output = agent_service.handle_chat(
+                user_context=UserContext(user_id=user_id),
+                request=chat_request,
+            )
             if memory_debug_enabled:
                 if output.used_memories:
                     print("[memory recall]")
@@ -223,7 +234,11 @@ def run_cli() -> int:
             if output.warnings:
                 print(f"[warning] {', '.join(output.warnings)}")
         except Exception as exc:  # noqa: BLE001
-            print(f"Aemeath> 当前处理失败：{exc}")
+            error_info = map_exception(exc)
+            print(
+                f"Aemeath> 当前处理失败：{error_info.public_message} "
+                f"[{error_info.code.value}]"
+            )
 
 
 if __name__ == "__main__":

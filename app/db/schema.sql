@@ -12,6 +12,21 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session_created
     ON messages (session_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+    roles_json TEXT NOT NULL DEFAULT '["user"]',
+    dev_token_hash TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_accounts_dev_token_hash
+    ON accounts (dev_token_hash);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,

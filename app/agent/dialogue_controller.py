@@ -14,6 +14,7 @@ from app.agent.ports import (
 )
 from app.agent.prompt_context import PromptCompiler
 from app.config import Settings
+from app.errors import map_exception, redact_sensitive
 from app.memory.schemas import MemoryQuery
 from app.observability.ports import PromptRunLoggerPort, TraceLoggerPort
 from app.observability.schemas import ConversationRun, PromptRunRecord, TraceEvent
@@ -22,17 +23,6 @@ from app.schemas import AgentTurnInput, AgentTurnOutput, UsedMemory
 from app.session.ports import SessionStorePort
 from app.state.store import RelationshipStore
 from app.utils.ids import new_id, utc_now
-
-SENSITIVE_TRACE_KEYS = {
-    "api_key",
-    "apikey",
-    "authorization",
-    "cookie",
-    "key",
-    "password",
-    "secret",
-    "token",
-}
 
 
 class DialogueController:
@@ -71,20 +61,7 @@ class DialogueController:
         self.prompt_compiler = PromptCompiler()
 
     def _safe_trace_payload(self, value: Any) -> Any:
-        if isinstance(value, dict):
-            safe: dict[Any, Any] = {}
-            for key, item in value.items():
-                key_text = str(key).lower()
-                if any(sensitive in key_text for sensitive in SENSITIVE_TRACE_KEYS):
-                    safe[key] = "[redacted]"
-                else:
-                    safe[key] = self._safe_trace_payload(item)
-            return safe
-        if isinstance(value, list):
-            return [self._safe_trace_payload(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(self._safe_trace_payload(item) for item in value)
-        return value
+        return redact_sensitive(value)
 
     def _record_trace(
         self,
@@ -132,7 +109,9 @@ class DialogueController:
         response: str | None,
         warnings: list[str],
         status: str,
+        error_code: str | None = None,
         error_type: str | None = None,
+        error_public_message: str | None = None,
         error: str | None = None,
     ) -> None:
         self.prompt_run_logger.record(
@@ -149,7 +128,9 @@ class DialogueController:
                 response=response,
                 warnings=list(warnings),
                 status=status,
+                error_code=error_code,
                 error_type=error_type,
+                error_public_message=error_public_message,
                 error=error,
             )
         )
@@ -178,14 +159,12 @@ class DialogueController:
                 character_id=active_character_id,
             )
         except Exception as exc:
+            error_info = map_exception(exc)
             self._record_trace(
                 event_type="session_validation_failed",
                 turn_id=turn_id,
                 turn_input=turn_input,
-                payload={
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
+                payload=error_info.to_log_dict(),
                 level="error",
                 character_id=active_character_id,
             )
@@ -438,6 +417,8 @@ class DialogueController:
                 ],
             )
         except Exception as exc:
+            error_info = map_exception(exc)
+            log_error = error_info.to_log_dict()
             run.ended_at = utc_now()
             run.status = "failed"
             run.warnings = warnings
@@ -450,8 +431,7 @@ class DialogueController:
                     "started_at": run.started_at,
                     "ended_at": run.ended_at,
                     "warnings": warnings,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
+                    "error": log_error,
                 },
                 level="error",
                 character_id=active_character_id,
@@ -471,7 +451,9 @@ class DialogueController:
                     response=response,
                     warnings=warnings,
                     status="failed",
-                    error_type=type(exc).__name__,
-                    error=str(exc),
+                    error_code=error_info.code.value,
+                    error_type=error_info.error_type,
+                    error_public_message=error_info.public_message,
+                    error=log_error["internal_message"],
                 )
             raise

@@ -114,7 +114,10 @@ v0.3 已跑通一个最小但可扩展的角色对话闭环：
 ## 高层数据流
 
 ```text
-CLI
+CLI / future API / future Web
+  |
+  v
+AgentService
   |
   v
 AgentTurnInput
@@ -138,6 +141,58 @@ AgentTurnOutput
 ```
 
 ## 分层设计
+
+### Application Service Layer
+
+位置：
+
+- `app/services/schemas.py`
+- `app/services/agent_service.py`
+- `app/main.py`
+
+职责：
+
+- 在 CLI / future API / future Web 和 `DialogueController` 之间提供稳定应用边界。
+- 将 `UserContext` / `ChatRequest` 转换为内部 `AgentTurnInput`。
+- 将 `AgentTurnOutput` 转换为 adapter 友好的 `ChatResponse`。
+- 成功时返回 DTO；失败时继续抛出原异常，由 adapter 调用 `map_exception(...)` 映射。
+- 可选记录 app-level summary log，但不记录 prompt、model messages、用户消息全文或 provider 原始响应。
+
+当前核心入口：
+
+- `build_agent_service()`
+- `AgentService.handle_chat()`
+
+### Auth / Account / Permission Layer
+
+位置：
+
+- `app/accounts/`
+- `app/auth/`
+- `app/permissions/`
+- `docs/auth_and_permissions.md`
+
+职责：
+
+- 提供本地 `accounts` 模型和默认账号 bootstrap。
+- 可选解析 dev/static bearer token，并输出 `UserContext`。
+- 提供最小 owner-only permission helper。
+- 保持账号状态、token、cookie、authorization 等 Auth 细节在 CLI / future API adapter
+  边界，不进入 `DialogueController`。
+
+当前边界：
+
+```text
+CLI / future API adapter
+  -> AuthService / LocalDefaultAccountResolver
+  -> UserContext
+  -> AgentService
+  -> DialogueController
+```
+
+`AgentService` v0.1 信任传入的 `UserContext`，不解析 token，不处理 cookie，不执行登录。
+账号状态校验由 `AuthService` / `AccountService` 完成。Session 归属错误继续使用
+`SESSION_OWNERSHIP_DENIED`；非 session 的通用 owner-only 拒绝使用 `PERMISSION_DENIED`。
 
 ### Interface / Orchestration Layer
 
@@ -250,6 +305,74 @@ disabled RAG runs, but it is no longer the default provider in `app/main.py`.
 - `MockChatModelClient`
 - `DeepSeekClient`
 - `FallbackChatModelClient`
+
+### Error Handling Layer
+
+Position:
+
+- `app/errors/`
+- `docs/error_handling.md`
+
+Responsibilities:
+
+- Provide a stable error contract shared by CLI, future API adapters, trace records, and prompt
+  run logs.
+- Map runtime exceptions into `ErrorInfo` with stable `ErrorCode`, public message, retryability,
+  details, and internal message fields.
+- Keep public error output separate from internal diagnostics.
+- Provide HTTP status mapping for future FastAPI work without coupling the current runtime to
+  FastAPI.
+- Redact sensitive values before errors are written to logs, traces, prompt-run records, or user
+  output.
+
+Current implementation:
+
+- `ErrorCode` defines stable categories for config, session, character, memory, model, storage,
+  validation, and internal errors.
+- `AemeathError` can carry a stable code and public message from business modules.
+- `map_exception(exc)` converts known exceptions into `ErrorInfo`.
+- `http_status_for_error(error_info)` is ready for future API response mapping.
+- `redact_sensitive(...)` redacts common secret fields, including `api_key`, `apikey`, `api-key`,
+  `x-api-key`, `x_api_key`, `authorization`, `cookie`, `password`, `secret`, and `token`, while
+  avoiding broad false positives such as ordinary `ordinary-key` fields.
+
+Boundary:
+
+- `DialogueController` still only orchestrates. It records structured failure metadata and
+  re-raises the original exception.
+- CLI and future API/service adapters decide how to present mapped public errors.
+- Future service and FastAPI layers should use `map_exception()` and `ErrorInfo.to_public_dict()`;
+  they should not return raw `str(exc)` to users.
+
+### Audio / TTS Experimental Workspace
+
+位置：
+
+- `Aemeath_roleplay_skill/audio/`
+- `docs/audio_module.md`
+
+职责：
+
+- 保存当前本地 GPT-SoVITS v2ProPlus 训练、标注和推理实验。
+- 作为后续 Aemeath 语音输出能力的候选适配层。
+- 暂不参与主对话 runtime，不进入 `DialogueController`、Prompt、RAG、Memory 或 Session。
+
+当前状态：
+
+- 已有本地 GPT-SoVITS 小模型和常驻 TTS console。
+- 该工作区依赖本地 Windows GPT-SoVITS runtime、训练素材、模型权重和 GPU 推理资源。
+- 因服务器 GPU 成本较高，现阶段仅登记为独立实验模块，不接入 CLI / API / Web 流程。
+- 整个 `Aemeath_roleplay_skill/audio/` 当前视为本地工作区，通过 `.gitignore` 排除，
+  不进入普通源码仓库。
+
+未来接入原则：
+
+- 文本回复应先正常生成并返回，Audio/TTS 作为回复后的可选输出能力。
+- TTS 失败不得影响文本回复。
+- 核心业务层不直接依赖 GPT-SoVITS、音频播放库或云端 TTS SDK。
+- 正式接入前应先定义 `TextToSpeechPort` / `AudioOutputPort`、配置结构和 trace 落点。
+- 如果部署到服务器，建议优先评估独立 TTS 服务进程或远程 TTS 服务，而不是让 Web API
+  进程直接持有 GPU 模型。
 
 ### Memory Layer
 
@@ -365,6 +488,39 @@ SQLite 是 v0.1 的实现选择，不应泄漏为业务模块的唯一依赖。
 - Trace Viewer / Debug Panel
 - Eval prompt snapshot
 
+2026-07-06 update: observability is split into three separate artifacts:
+
+```text
+App Log      process/runtime/application boundary events
+Trace Log    one agent turn's internal structured events
+Prompt Log   prompt/messages/sections/response snapshot for prompt debugging
+```
+
+Current JSONL trace persistence is implemented by `JsonlTraceLogger`, wired by `app/main.py`
+when `AEMEATH_ENABLE_TRACE_LOG=true`. The default root is `.aemeath/traces`, and records are
+UTF-8 JSONL with `ensure_ascii=False`.
+
+The minimal app logging contract is `AppLogRecord`, `AppLoggerPort`, `JsonlAppLogger`, and
+`NoopAppLogger`. App logging belongs at CLI/API/service/worker boundaries, not inside
+`DialogueController`.
+
+Prompt-run logging remains separate through `PromptRunLoggerPort` and keeps its existing local
+debugging purpose under `.aemeath/sessions`. Trace and app logs should default to ids, counts,
+statuses, durations, error codes, and sanitized metadata rather than full prompt text.
+
+### Error Handling Observability Notes
+
+Prompt-run logging now preserves failed-turn error fields:
+
+- `error_code`
+- `error_type`
+- `error_public_message`
+- sanitized `error`
+
+The prompt log inspector displays these fields when present and falls back to unknown/none values
+for older logs. Structured logging should reuse the same `app/errors` sanitizer and error mapping
+instead of introducing a separate error taxonomy.
+
 ### Tool / MCP Extension Layer
 
 位置：
@@ -398,9 +554,15 @@ app/main.py
   creates CharacterRegistry
   creates WorldInfoEvidenceProvider
   creates NoopTraceLogger
+  creates NoopAppLogger / JsonlAppLogger for AgentService
   creates MemoryReader/Writer
   creates ResponseGenerator(ChatModelClient)
   injects all dependencies into DialogueController
+  creates AgentService as the app boundary
+
+AgentService
+  accepts UserContext + ChatRequest
+  returns ChatResponse or re-raises original exceptions
 
 DialogueController
   depends on ports/protocols

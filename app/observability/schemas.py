@@ -36,6 +36,20 @@ class TraceEvent:
 
 
 @dataclass(frozen=True)
+class AppLogRecord:
+    event_name: str
+    level: TraceLevel = "info"
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: str = field(default_factory=utc_now)
+    request_id: str | None = None
+    turn_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = None
+    character_id: str | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
 class PromptRunRecord:
     run_id: str
     turn_id: str
@@ -50,5 +64,7 @@ class PromptRunRecord:
     warnings: list[str]
     status: PromptRunStatus
     created_at: str = field(default_factory=utc_now)
+    error_code: str | None = None
     error_type: str | None = None
+    error_public_message: str | None = None
     error: str | None = None

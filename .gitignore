@@ -214,6 +214,11 @@ data/*.sqlite3
 source_doc/
 Aemeath_roleplay_skill/wuthering_waves_gamedata/
 
+# Aemeath local Audio / GPT-SoVITS workspace.
+# This is a GPU-heavy local experiment and is documented in docs/audio_module.md,
+# but it is not part of the deployable text-agent source tree yet.
+Aemeath_roleplay_skill/audio/
+
 # PyPI configuration file
 .pypirc
 

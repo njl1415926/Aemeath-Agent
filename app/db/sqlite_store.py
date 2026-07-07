@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from app.accounts.schemas import AccountRecord, AccountStatus
 from app.memory.schemas import (
     MemoryExtractionJobRecord,
     MemoryJobEnqueueResult,
@@ -26,6 +27,8 @@ from app.session.schemas import SessionRecord, SessionStatus
 from app.utils.ids import new_id, utc_now
 
 MEMORY_SCOPE_MIGRATION_VERSION = "memory_scope_provenance_v1"
+DEFAULT_ACCOUNT_ID = "user_default"
+DEFAULT_ACCOUNT_ROLES_JSON = json.dumps(["user"], ensure_ascii=True)
 
 
 def _clamp_stat(value: int) -> int:
@@ -51,6 +54,7 @@ class SQLiteStore:
             self._migrate_relationship_states(conn)
             self._migrate_session_columns(conn)
             self._backfill_sessions(conn)
+            self._backfill_accounts(conn)
             conn.commit()
             self._migrate_memory_scope_provenance(conn)
 
@@ -377,6 +381,258 @@ class SQLiteStore:
                     updated_at,
                 ),
             )
+
+    def _table_has_column(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        column_name: str,
+    ) -> bool:
+        table = conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            """,
+            (table_name,),
+        ).fetchone()
+        if table is None:
+            return False
+        return any(
+            row["name"] == column_name
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        )
+
+    def _distinct_user_ids_from_table(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+    ) -> set[str]:
+        if not self._table_has_column(
+            conn,
+            table_name=table_name,
+            column_name="user_id",
+        ):
+            return set()
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT user_id
+            FROM {table_name}
+            WHERE user_id IS NOT NULL AND user_id != ''
+            """
+        ).fetchall()
+        return {row["user_id"] for row in rows}
+
+    def _backfill_accounts(self, conn: sqlite3.Connection) -> None:
+        user_ids = {DEFAULT_ACCOUNT_ID}
+        for table_name in [
+            "sessions",
+            "messages",
+            "relationship_states",
+            "long_term_memories",
+            "memory_extraction_jobs",
+        ]:
+            user_ids.update(
+                self._distinct_user_ids_from_table(conn, table_name=table_name)
+            )
+
+        now = utc_now()
+        for user_id in sorted(user_ids):
+            display_name = "Default User" if user_id == DEFAULT_ACCOUNT_ID else user_id
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO accounts (
+                    id, username, display_name, status, roles_json,
+                    dev_token_hash, created_at, updated_at, last_login_at
+                )
+                VALUES (?, ?, ?, 'active', ?, NULL, ?, ?, NULL)
+                """,
+                (
+                    user_id,
+                    user_id,
+                    display_name,
+                    DEFAULT_ACCOUNT_ROLES_JSON,
+                    now,
+                    now,
+                ),
+            )
+
+    def _account_from_row(self, row: sqlite3.Row) -> AccountRecord:
+        return AccountRecord(
+            id=row["id"],
+            username=row["username"],
+            display_name=row["display_name"],
+            status=row["status"],
+            roles=json.loads(row["roles_json"]),
+            dev_token_hash=row["dev_token_hash"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_login_at=row["last_login_at"],
+        )
+
+    def get_account(self, *, account_id: str) -> AccountRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM accounts
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (account_id,),
+            ).fetchone()
+        return self._account_from_row(row) if row else None
+
+    def get_account_by_dev_token_hash(
+        self,
+        *,
+        dev_token_hash: str,
+    ) -> AccountRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM accounts
+                WHERE dev_token_hash = ?
+                LIMIT 1
+                """,
+                (dev_token_hash,),
+            ).fetchone()
+        return self._account_from_row(row) if row else None
+
+    def upsert_account(
+        self,
+        *,
+        account_id: str,
+        username: str,
+        display_name: str | None,
+        status: AccountStatus,
+        roles: list[str],
+        dev_token_hash: str | None = None,
+    ) -> AccountRecord:
+        now = utc_now()
+        roles_json = json.dumps(roles, ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO accounts (
+                    id, username, display_name, status, roles_json,
+                    dev_token_hash, created_at, updated_at, last_login_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(id) DO UPDATE SET
+                    username = excluded.username,
+                    display_name = excluded.display_name,
+                    status = excluded.status,
+                    roles_json = excluded.roles_json,
+                    dev_token_hash = excluded.dev_token_hash,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    account_id,
+                    username,
+                    display_name,
+                    status,
+                    roles_json,
+                    dev_token_hash,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT *
+                FROM accounts
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            raise sqlite3.IntegrityError(f"account {account_id!r} was not persisted")
+        return self._account_from_row(row)
+
+    def set_account_dev_token_hash(
+        self,
+        *,
+        account_id: str,
+        dev_token_hash: str | None,
+    ) -> AccountRecord:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET dev_token_hash = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (dev_token_hash, utc_now(), account_id),
+            )
+            row = conn.execute(
+                """
+                SELECT *
+                FROM accounts
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            raise sqlite3.IntegrityError(f"account {account_id!r} was not found")
+        return self._account_from_row(row)
+
+    def set_account_status(
+        self,
+        *,
+        account_id: str,
+        status: AccountStatus,
+    ) -> AccountRecord:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, utc_now(), account_id),
+            )
+            row = conn.execute(
+                """
+                SELECT *
+                FROM accounts
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            raise sqlite3.IntegrityError(f"account {account_id!r} was not found")
+        return self._account_from_row(row)
+
+    def touch_account_login(self, *, account_id: str) -> AccountRecord:
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET last_login_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, account_id),
+            )
+            row = conn.execute(
+                """
+                SELECT *
+                FROM accounts
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            raise sqlite3.IntegrityError(f"account {account_id!r} was not found")
+        return self._account_from_row(row)
 
     def _session_select_sql(self) -> str:
         return """

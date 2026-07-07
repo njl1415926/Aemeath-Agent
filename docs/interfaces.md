@@ -82,6 +82,158 @@ Boundary:
 
 本文档定义 Aemeath Agent 当前稳定接口和后续扩展约束。Worker session 实现功能时应优先依赖这些接口，而不是直接耦合具体实现。
 
+## Service Layer Interfaces
+
+位置：
+
+- `app/services/schemas.py`
+- `app/services/agent_service.py`
+
+`AgentService` is the stable application boundary for CLI, future API, future Web, streaming,
+and optional post-response adapters. It wraps the internal turn contract without moving
+Character, Memory, RAG, Prompt, Model, State, or Session policy out of their modules.
+
+### UserContext
+
+```python
+@dataclass(frozen=True)
+class UserContext:
+    user_id: str
+    roles: list[str] = field(default_factory=list)
+    request_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+```
+
+`UserContext` is the future Auth insertion point. v0.1 only requires `user_id`; roles and
+metadata are carried for future adapters and must not be treated as a full permission model.
+
+### ChatRequest
+
+```python
+@dataclass(frozen=True)
+class ChatRequest:
+    session_id: str
+    character_id: str
+    message: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+```
+
+### ChatResponse
+
+```python
+@dataclass(frozen=True)
+class UsedMemorySummary:
+    id: str
+    content: str
+    score: float | None
+    match_reason: str
+
+
+@dataclass(frozen=True)
+class ChatResponse:
+    turn_id: str
+    session_id: str
+    character_id: str
+    response: str
+    warnings: list[str]
+    used_memory_ids: list[str]
+    state_delta: dict[str, int]
+    used_memories: list[UsedMemorySummary] = field(default_factory=list)
+```
+
+`ChatResponse.character_id` is the requested target character in v0.1. If the Character Registry
+falls back to the default character, the actual fallback remains visible through `warnings`;
+`AgentTurnOutput` is not changed for this service task.
+
+### AgentService
+
+```python
+class AgentService:
+    def handle_chat(
+        self,
+        *,
+        user_context: UserContext,
+        request: ChatRequest,
+    ) -> ChatResponse:
+        ...
+```
+
+Success returns `ChatResponse`. Failure re-raises the original exception. CLI and future API
+adapters should use `map_exception(exc)` and `ErrorInfo.to_public_dict()` instead of relying on
+raw exception text or introducing `ServiceResult` / `ServiceError`.
+
+`AgentService` may receive `AppLoggerPort`; the default is `NoopAppLogger`. Service app logs must
+stay summary-only: request id, user id, session id, character id, status, turn id, error code,
+duration, and warning count. They must not include full prompts, model messages, user message
+text, provider raw responses, API keys, authorization headers, cookies, or tokens.
+
+## Auth / Account / Permission Interfaces
+
+位置：
+
+- `app/accounts/`
+- `app/auth/`
+- `app/permissions/`
+- `docs/auth_and_permissions.md`
+
+### AccountRecord
+
+```python
+@dataclass(frozen=True)
+class AccountRecord:
+    id: str
+    username: str
+    display_name: str | None
+    status: Literal["active", "disabled"]
+    roles: list[str]
+    dev_token_hash: str | None
+    created_at: str
+    updated_at: str
+    last_login_at: str | None
+```
+
+`id` is the stable internal `user_id`. The default account is `user_default` with role `user`.
+The SQLite adapter backfills distinct historical `user_id` values from runtime tables when
+available.
+
+### AuthService
+
+```python
+class AuthService:
+    def resolve_bearer_token(
+        self,
+        token: str | None,
+        *,
+        request_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> UserContext:
+        ...
+```
+
+`resolve_bearer_token(...)` accepts a raw dev token or `Bearer ...` string, hashes it, looks up an
+active account by `dev_token_hash`, updates `last_login_at`, and returns `UserContext`.
+It never persists or logs the raw token.
+
+`LocalDefaultAccountResolver` resolves the local CLI/default account to `UserContext` without
+introducing a login flow.
+
+### PermissionService
+
+```python
+class PermissionService:
+    def require_owner(
+        self,
+        *,
+        resource_user_id: str,
+        user_context: UserContext,
+    ) -> None:
+        ...
+```
+
+Permission v0.1 is owner-only. Session owner failures continue to use
+`SESSION_OWNERSHIP_DENIED`; generic non-session owner-only failures use `PERMISSION_DENIED`.
+Roles are carried in `UserContext` for future use but are not a full RBAC model in v0.1.
+
 ## Core Turn Contract
 
 位置：
@@ -480,6 +632,127 @@ class ChatModelClient(Protocol):
 - 模型供应商专属参数应限制在 provider client 内部，不应污染 `ContextBuilder` 或 `DialogueController`。
 - 结构化模型错误应在 model layer 内定义，再由 CLI 或 trace 层决定如何展示。
 
+## Future Audio / TTS Interface
+
+当前状态：
+
+- `Aemeath_roleplay_skill/audio/` 是本地 GPT-SoVITS 实验工作区。
+- 该能力尚未接入 Agent 主流程。
+- 当前没有 `AudioOutputPort`、`TextToSpeechPort` 或服务端 TTS API。
+
+未来建议的最小接口方向：
+
+```python
+class TextToSpeechPort(Protocol):
+    def synthesize(
+        self,
+        *,
+        text: str,
+        user_id: str,
+        session_id: str,
+        character_id: str,
+        voice_id: str | None = None,
+        emotion: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AudioSynthesisResult:
+        ...
+```
+
+建议结果结构：
+
+- `audio_id`
+- `file_path` 或 `url`
+- `format`
+- `duration_seconds`
+- `provider`
+- `latency_ms`
+- `warnings`
+
+边界约束：
+
+- Audio/TTS 发生在 `AgentTurnOutput.response` 之后，不参与 prompt 编译。
+- `DialogueController` 不应直接依赖 GPT-SoVITS。
+- CLI / Web / API adapter 可选择是否调用 TTS。
+- TTS 失败应降级为无音频输出，并通过 trace / app log 记录。
+- GPT-SoVITS 本地权重、训练素材、运行包和输出音频不进入源码仓库。
+- 服务器部署时，优先把 TTS 视为独立服务或可关闭的 adapter，因为它需要 GPU 资源。
+
+## Error Handling Interfaces
+
+Position:
+
+- `app/errors/base.py`
+- `app/errors/codes.py`
+- `app/errors/mapper.py`
+- `app/errors/http.py`
+- `app/errors/sanitizer.py`
+
+### ErrorCode
+
+`ErrorCode` is the stable machine-readable error category used by CLI, future API adapters,
+trace records, and prompt-run failure logs. Codes currently cover:
+
+- generic runtime and invalid input;
+- account auth and owner-only permission errors;
+- config and missing secret errors;
+- session lifecycle and ownership errors;
+- character load/manifest errors;
+- memory source and extraction errors;
+- model request, auth, rate limit, timeout, unavailable, and invalid-response errors;
+- storage availability, migration, and constraint errors.
+
+### ErrorInfo
+
+`ErrorInfo` is the normalized error payload:
+
+- `code`
+- `message`
+- `retryable`
+- `error_type`
+- `details`
+- `internal_message`
+
+Use `ErrorInfo.to_public_dict()` for user/API-facing output and `ErrorInfo.to_log_dict()` for
+sanitized logs and traces.
+
+### Mapping And HTTP Boundary
+
+- `AemeathError` lets business modules raise a stable code plus public message.
+- `map_exception(exc)` converts known exceptions into `ErrorInfo`.
+- `http_status_for_error(error_info)` maps `ErrorInfo` into a future HTTP status code.
+- Current CLI code uses the same mapping but does not depend on FastAPI.
+
+Future Service/API layers should reuse these interfaces instead of creating a second error
+taxonomy.
+
+### Sanitizer
+
+`redact_sensitive(...)` and related helpers must be used before writing error details to logs,
+prompt-run records, traces, or public responses.
+
+Current sensitive key coverage includes:
+
+- `api_key`
+- `apikey`
+- `api-key`
+- `x-api-key`
+- `x_api_key`
+- `authorization`
+- `cookie`
+- `password`
+- `secret`
+- `token`
+
+Text redaction also covers common `Bearer ...` and `key=value` style secret fragments. It should
+not over-redact ordinary field names such as `ordinary-key`.
+
+### Runtime Integration
+
+- `DialogueController` records structured failed-turn error fields and re-raises.
+- Prompt-run logs include `error_code`, `error_type`, `error_public_message`, and sanitized
+  `error` for failed model/controller runs.
+- CLI prints stable public messages such as `[SESSION_ENDED]`.
+
 ## Memory Decision Contract
 
 位置：
@@ -660,6 +933,12 @@ class TraceLoggerPort(Protocol):
 当前实现：
 
 - `NoopTraceLogger`
+- `JsonlTraceLogger`
+
+Runtime configuration:
+
+- `AEMEATH_ENABLE_TRACE_LOG=false`
+- `AEMEATH_TRACE_LOG_ROOT=.aemeath/traces`
 
 扩展约束：
 
@@ -668,6 +947,48 @@ class TraceLoggerPort(Protocol):
 - Controller 写入 trace 前应对常见敏感 metadata key 做基础脱敏，例如 token、secret、password、cookie、authorization。
 - Controller 应在 turn 中途异常时记录 `turn_failed`，再继续抛出异常交给上层处理。
 - 后续 SQLite / JSONL / OpenTelemetry trace logger 都应实现 `TraceLoggerPort`。
+
+### AppLogRecord
+
+Application log records are for process and boundary events, such as CLI startup, future API
+request handling, worker lifecycle events, and operational failures. They are separate from agent
+turn trace events and prompt-run logs.
+
+- `event_name`
+- `level`
+- `created_at`
+- `request_id`
+- `turn_id`
+- `session_id`
+- `user_id`
+- `character_id`
+- `error_code`
+- `payload`
+
+### AppLoggerPort
+
+```python
+class AppLoggerPort(Protocol):
+    def record(self, record: AppLogRecord) -> None:
+        ...
+```
+
+Current implementations:
+
+- `NoopAppLogger`
+- `JsonlAppLogger`
+
+Runtime configuration:
+
+- `AEMEATH_ENABLE_APP_LOG=false`
+- `AEMEATH_APP_LOG_ROOT=.aemeath/app_logs`
+
+Boundary:
+
+- App logs belong at CLI/API/service/worker boundaries.
+- `DialogueController` is not injected with `AppLoggerPort` in v0.1.
+- App log payloads must reuse `app.errors.redact_sensitive(...)`.
+- App logs should not store full prompts, full model messages, or raw provider responses.
 
 ## State Update Contract
 
