@@ -23,6 +23,7 @@ class Settings:
     use_mock_llm: bool
     character_card_path: Path
     prompt_template_path: Path
+    db_backend: str = "sqlite_raw"
     enable_long_term_memory: bool = False
     enable_prompt_run_log: bool = True
     prompt_run_log_root: Path = Path(".aemeath/sessions")
@@ -61,6 +62,7 @@ class Settings:
             deepseek_thinking=os.getenv("DEEPSEEK_THINKING", "disabled"),
             deepseek_reasoning_effort=os.getenv("DEEPSEEK_REASONING_EFFORT", ""),
             db_path=db_path,
+            db_backend=os.getenv("AEMEATH_DB_BACKEND", "sqlite_raw"),
             recent_message_limit=max(1, recent_limit),
             use_mock_llm=use_mock,
             character_card_path=Path(
@@ -117,6 +119,10 @@ class Settings:
         )
 
     def validate(self) -> None:
+        if self.db_backend not in {"sqlite_raw", "sqlalchemy"}:
+            raise ValueError(
+                "AEMEATH_DB_BACKEND must be either 'sqlite_raw' or 'sqlalchemy'."
+            )
         if self.use_mock_llm:
             return
         if not self.deepseek_api_key:

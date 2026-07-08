@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 from app.config import Settings
-from app.db.sqlite_store import SQLiteStore
+from app.db.store_factory import StoreFacade, create_store
 from app.memory.extractor import MemoryExtractionService
 from app.memory.mock_extractor import MockMemoryExtractionModelClient
 from app.memory.runtime import build_memory_embedding_provider
@@ -26,7 +26,7 @@ def _build_model_client(settings: Settings):
     return FallbackChatModelClient(primary=deepseek_client, fallback=MockChatModelClient())
 
 
-def _messages_for_job(store: SQLiteStore, job) -> list[MessageRecord]:
+def _messages_for_job(store: StoreFacade, job) -> list[MessageRecord]:
     messages: list[MessageRecord] = []
     for message_id in job.source_message_ids:
         message = store.get_message(message_id=message_id)
@@ -58,7 +58,7 @@ def run_worker(settings: Settings | None = None) -> int:
         print("[memory worker] long-term memory is disabled")
         return 0
 
-    store = SQLiteStore(settings.db_path)
+    store = create_store(db_path=settings.db_path, backend=settings.db_backend)
     embedding_provider = build_memory_embedding_provider(settings)
     print(
         "[memory worker] loading embedding provider "

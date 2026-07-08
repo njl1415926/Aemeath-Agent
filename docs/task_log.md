@@ -1390,3 +1390,95 @@ Validation:
 - `ruff check .`: All checks passed
 - `python -m compileall -q app tests`: passed
 - `git diff --check`: no whitespace errors, CRLF warnings only
+
+### T-0127 SQLAlchemy Persistence Backend v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 10: SQLAlchemy Persistence Design
+
+Goal:
+- Add an opt-in SQLAlchemy persistence backend while keeping `sqlite_raw` as the default.
+- Internally split SQLAlchemy persistence into repositories and expose a temporary
+  `SqlAlchemyStore` facade for current port compatibility.
+- Avoid PostgreSQL, async SQLAlchemy, Alembic revisions, old `data/aemeath.db` migration, and
+  removal of `SQLiteStore`.
+
+Scope:
+- Added SQLAlchemy as a runtime dependency.
+- Added SQLAlchemy models and fresh SQLite `create_all` initialization.
+- Added repository split:
+  - `MessageRepository`
+  - `SessionRepository`
+  - `AccountRepository`
+  - `RelationshipRepository`
+  - `MemoryRepository`
+  - `MemoryJobRepository`
+  - `MemoryEmbeddingRepository`
+- Added `SqlAlchemyStore` facade that only composes and forwards to repositories.
+- Added `create_store(...)` factory and `AEMEATH_DB_BACKEND=sqlite_raw|sqlalchemy`.
+- Wired `app/main.py` and `app/memory/worker.py` through the store factory.
+- Added `docs/persistence.md`.
+- Added parameterized store contract tests under `tests/store_contract/`.
+
+Boundary:
+- Default backend remains `sqlite_raw`.
+- SQLAlchemy backend is opt-in and experimental.
+- `SQLiteStore` remains intact.
+- No Alembic files were added.
+- No PostgreSQL or async support was added.
+- No `DialogueController`, Character, RAG, Prompt, or Model strategy changes.
+- `app/memory/worker.py` was touched only for store factory wiring; memory business logic was not
+  changed.
+- `app/session/*` was not modified.
+
+Current SQLAlchemy backend support:
+- Fresh SQLite databases through SQLAlchemy models.
+- Existing store ports through `SqlAlchemyStore`.
+- Account bootstrap for `user_default`.
+- Session/message read model parity for current tests.
+- Memory scope visibility, exact dedupe, jobs, and embedding BLOB recall for current tests.
+
+Deferred:
+- Alembic baseline and migration files.
+- PostgreSQL dialect support.
+- async SQLAlchemy.
+- Old raw SQLite database migration into SQLAlchemy backend.
+- Making SQLAlchemy the default backend.
+- Full infinite-loop memory worker process test; current coverage uses a single-job worker smoke.
+
+Validation:
+- `pytest tests/store_contract -q`: 24 passed
+- SQLAlchemy normal runtime smoke: passed
+- SQLAlchemy long-term memory job enqueue smoke: passed
+- SQLAlchemy disabled memory worker smoke: passed
+- SQLAlchemy enabled memory worker single-job smoke: passed
+- SQLAlchemy two-store job claim smoke: passed
+- Embedding shape mismatch parity test: passed
+- `pytest`: 149 passed
+- `ruff check .`: All checks passed
+
+Manager review:
+- Accepted on 2026-07-07.
+- Memory module review passed; no blocking findings.
+- Persistence worker added the requested SQLAlchemy memory worker smoke, concurrent claim smoke,
+  and embedding shape mismatch parity test.
+- Session module found and persistence worker fixed a `list_sessions(..., limit=N)` ordering bug:
+  SQLAlchemy now sorts by `updated_at DESC` before applying `LIMIT`, matching raw SQLite.
+- Added a cross-backend session contract test for newest-session windowing.
+- Re-ran `pytest -q tests/store_contract/test_sqlalchemy_memory_worker_smoke.py`: 2 passed.
+- Re-ran `pytest -q tests/store_contract/test_memory_contract.py`: 10 passed.
+- Re-ran `pytest -q tests/store_contract/test_session_message_contract.py`: 6 passed.
+- Re-ran `pytest -q tests/store_contract`: 24 passed.
+- Re-ran `pytest`: 149 passed.
+- Re-ran `ruff check .`: All checks passed.
+- Re-ran `python -m compileall -q app tests`: passed.
+- Re-ran `git diff --check`: no whitespace errors, CRLF warnings only.
+- Architecture decision confirmed: keep `sqlite_raw` as default, keep SQLAlchemy backend opt-in,
+  and keep `SqlAlchemyStore` as a temporary facade over repositories until service/API boundaries
+  are ready to accept narrower repository injection.
+
+Follow-up review requests:
+- Memory module review: passed on 2026-07-07.
+- Session module review: passed on 2026-07-07 after the `list_sessions` ordering fix.

@@ -8,7 +8,7 @@ from app.agent.state_updater import StateUpdater
 from app.auth.service import hash_dev_token
 from app.character.provider import CharacterRegistry
 from app.config import Settings
-from app.db.sqlite_store import SQLiteStore
+from app.db.store_factory import StoreFacade, create_store
 from app.memory.admin import MemoryAdminService
 from app.memory.classifier import MemoryWriteClassifier
 from app.memory.disabled import (
@@ -34,10 +34,10 @@ from app.state.classifier import StateUpdateClassifier
 
 def build_controller(
     settings: Settings | None = None,
-) -> tuple[DialogueController, MemoryAdminService, Settings, SQLiteStore]:
+) -> tuple[DialogueController, MemoryAdminService, Settings, StoreFacade]:
     settings = settings or Settings.from_env()
     settings.validate()
-    store = SQLiteStore(settings.db_path)
+    store = create_store(db_path=settings.db_path, backend=settings.db_backend)
     _bootstrap_accounts(settings=settings, store=store)
     if settings.use_mock_llm:
         chat_model = MockChatModelClient()
@@ -118,7 +118,7 @@ def build_controller(
     return controller, memory_admin, settings, store
 
 
-def _bootstrap_accounts(*, settings: Settings, store: SQLiteStore) -> None:
+def _bootstrap_accounts(*, settings: Settings, store: StoreFacade) -> None:
     account_service = AccountService(store)
     account_service.ensure_account(
         account_id=settings.default_user_id,
@@ -135,7 +135,7 @@ def _bootstrap_accounts(*, settings: Settings, store: SQLiteStore) -> None:
 
 def build_agent_service(
     settings: Settings | None = None,
-) -> tuple[AgentService, MemoryAdminService, Settings, SQLiteStore]:
+) -> tuple[AgentService, MemoryAdminService, Settings, StoreFacade]:
     controller, memory_admin, resolved_settings, store = build_controller(settings=settings)
     if resolved_settings.enable_app_log:
         app_logger = JsonlAppLogger(root_dir=resolved_settings.app_log_root)
