@@ -43,6 +43,10 @@ class Settings:
     default_character_id: str = "aemeath"
     dev_auth_token: str | None = None
     dev_auth_user_id: str = "user_default"
+    api_allow_local_default_user: bool = False
+    api_enable_prompt_run_log: bool = False
+    enable_model_fallback: bool = True
+    api_enable_model_fallback: bool = False
 
     @staticmethod
     def from_env() -> "Settings":
@@ -116,6 +120,18 @@ class Settings:
             default_character_id=os.getenv("AEMEATH_DEFAULT_CHARACTER_ID", "aemeath"),
             dev_auth_token=os.getenv("AEMEATH_DEV_AUTH_TOKEN") or None,
             dev_auth_user_id=os.getenv("AEMEATH_DEV_AUTH_USER_ID", "user_default"),
+            api_allow_local_default_user=_parse_bool(
+                os.getenv("AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER", "false")
+            ),
+            api_enable_prompt_run_log=_parse_bool(
+                os.getenv("AEMEATH_API_ENABLE_PROMPT_RUN_LOG", "false")
+            ),
+            enable_model_fallback=_parse_bool(
+                os.getenv("AEMEATH_ENABLE_MODEL_FALLBACK", "true")
+            ),
+            api_enable_model_fallback=_parse_bool(
+                os.getenv("AEMEATH_API_ENABLE_MODEL_FALLBACK", "false")
+            ),
         )
 
     def validate(self) -> None:

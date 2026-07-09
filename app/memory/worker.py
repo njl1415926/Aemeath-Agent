@@ -4,6 +4,7 @@ import time
 
 from app.config import Settings
 from app.db.store_factory import StoreFacade, create_store
+from app.errors import map_exception
 from app.memory.extractor import MemoryExtractionService
 from app.memory.mock_extractor import MockMemoryExtractionModelClient
 from app.memory.runtime import build_memory_embedding_provider
@@ -51,6 +52,44 @@ def _messages_for_job(store: StoreFacade, job) -> list[MessageRecord]:
     return [message for message in messages if message.id and message.content]
 
 
+def _safe_worker_error(exc: Exception) -> str:
+    error_info = map_exception(exc)
+    log_payload = error_info.to_log_dict()
+    return f"{error_info.code.value}: {log_payload['internal_message']}"
+
+
+def _process_memory_extraction_job(
+    *,
+    store: StoreFacade,
+    extraction_service: MemoryExtractionService,
+    job,
+) -> None:
+    try:
+        result = extraction_service.extract_and_persist(
+            user_id=job.user_id,
+            session_id=job.session_id,
+            character_id=job.character_id,
+            messages=_messages_for_job(store, job),
+            trigger_type=job.trigger_type,
+            source_job_id=job.id,
+        )
+        store.complete_memory_extraction_job(
+            job_id=job.id,
+            result_payload={
+                "created_memory_ids": result.created_memory_ids,
+                "skipped_contents": result.skipped_contents,
+            },
+        )
+        print(
+            f"[memory worker] completed {job.id} "
+            f"created={len(result.created_memory_ids)}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        safe_error = _safe_worker_error(exc)
+        store.fail_memory_extraction_job(job_id=job.id, error=safe_error)
+        print(f"[memory worker] failed {job.id}: {safe_error}")
+
+
 def run_worker(settings: Settings | None = None) -> int:
     settings = settings or Settings.from_env()
     settings.validate()
@@ -86,29 +125,11 @@ def run_worker(settings: Settings | None = None) -> int:
                 time.sleep(settings.memory_worker_poll_interval_seconds)
                 continue
             print(f"[memory worker] running {job.id} trigger={job.trigger_type}")
-            try:
-                result = extraction_service.extract_and_persist(
-                    user_id=job.user_id,
-                    session_id=job.session_id,
-                    character_id=job.character_id,
-                    messages=_messages_for_job(store, job),
-                    trigger_type=job.trigger_type,
-                    source_job_id=job.id,
-                )
-                store.complete_memory_extraction_job(
-                    job_id=job.id,
-                    result_payload={
-                        "created_memory_ids": result.created_memory_ids,
-                        "skipped_contents": result.skipped_contents,
-                    },
-                )
-                print(
-                    f"[memory worker] completed {job.id} "
-                    f"created={len(result.created_memory_ids)}"
-                )
-            except Exception as exc:  # noqa: BLE001
-                store.fail_memory_extraction_job(job_id=job.id, error=str(exc))
-                print(f"[memory worker] failed {job.id}: {exc}")
+            _process_memory_extraction_job(
+                store=store,
+                extraction_service=extraction_service,
+                job=job,
+            )
     except KeyboardInterrupt:
         print("[memory worker] bye")
         return 0

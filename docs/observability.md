@@ -78,10 +78,15 @@ AEMEATH_ENABLE_APP_LOG=false
 AEMEATH_APP_LOG_ROOT=.aemeath/app_logs
 AEMEATH_ENABLE_PROMPT_RUN_LOG=true
 AEMEATH_PROMPT_RUN_LOG_ROOT=.aemeath/sessions
+AEMEATH_API_ENABLE_PROMPT_RUN_LOG=false
+AEMEATH_ENABLE_MODEL_FALLBACK=true
+AEMEATH_API_ENABLE_MODEL_FALLBACK=false
 ```
 
 Trace and app logs are disabled by default to keep local CLI runs quiet. Prompt-run logging keeps
-its existing behavior.
+its existing CLI debugging behavior. FastAPI overrides prompt-run logging through
+`AEMEATH_API_ENABLE_PROMPT_RUN_LOG`, which defaults to false because prompt logs contain full
+prompt/message/response snapshots.
 
 ## Redaction
 
@@ -104,10 +109,21 @@ Sensitive keys and text fragments covered by the shared sanitizer include:
 Future service/API/worker code should reuse the same sanitizer instead of adding a second
 observability-specific sensitive-field list.
 
+Memory worker failure handling persists and prints sanitized mapped errors rather than raw
+exception text.
+
 ## Runtime Wiring
 
 `app/main.py` wires `JsonlTraceLogger` when `AEMEATH_ENABLE_TRACE_LOG=true`; otherwise it uses
 `NoopTraceLogger`.
+
+`app/api/server.py` builds API runtime settings with `enable_prompt_run_log` set from
+`AEMEATH_API_ENABLE_PROMPT_RUN_LOG`. API request ids are added to turn metadata by
+`AgentService`, allowing trace and prompt metadata to correlate with API app logs.
+
+CLI runtime keeps model fallback enabled by default. FastAPI runtime sets model fallback from
+`AEMEATH_API_ENABLE_MODEL_FALLBACK`, defaulting to false so provider failures can be observed as
+stable API errors.
 
 The app logger contract exists for process and boundary logs, but v0.1 does not inject app logging
 into `DialogueController`. Future CLI, service, API, and worker operation work can use

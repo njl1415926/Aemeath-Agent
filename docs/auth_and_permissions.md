@@ -6,12 +6,13 @@ Auth / Account v0.1 provides a local account model, default account bootstrap, o
 token parsing, and a minimal owner-only permission helper.
 
 It does not implement username/password login, registration, cookies, refresh tokens, OAuth,
-admin UI, shared sessions, complex RBAC, FastAPI, or Web UI.
+admin UI, shared sessions, complex RBAC, or Web UI. FastAPI v0.1 uses this auth boundary but does
+not add username/password or production token flows.
 
 ## Runtime Boundary
 
 ```text
-CLI / future API adapter
+CLI / FastAPI adapter
   -> AuthService / LocalDefaultAccountResolver
   -> UserContext
   -> AgentService
@@ -67,6 +68,10 @@ payloads.
 `AuthService.resolve_bearer_token(token)` accepts a raw token or `Bearer ...` value and returns
 `UserContext` for an active matching account.
 
+`AEMEATH_DEV_AUTH_TOKEN` is the dev-token source of truth for the configured
+`AEMEATH_DEV_AUTH_USER_ID`. When the env var is unset on startup, that account's stored
+`dev_token_hash` is cleared so the previous token is revoked for the same database.
+
 ## Permissions
 
 Permission v0.1 is owner-only:
@@ -94,7 +99,6 @@ Public payloads must not reveal token values, account secrets, or resource owner
 
 ## Deferred
 
-- FastAPI
 - Web UI
 - username/password login
 - password hashing

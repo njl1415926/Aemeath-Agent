@@ -25,6 +25,7 @@ from app.model.deepseek import DeepSeekClient, FallbackChatModelClient
 from app.model.mock import MockChatModelClient
 from app.observability.app_logger import JsonlAppLogger
 from app.observability.noop import NoopAppLogger, NoopPromptRunLogger, NoopTraceLogger
+from app.observability.ports import AppLoggerPort
 from app.observability.prompt_run_logger import JsonlPromptRunLogger
 from app.observability.trace_logger import JsonlTraceLogger
 from app.retrieval.provider import WorldInfoEvidenceProvider
@@ -49,10 +50,13 @@ def build_controller(
             thinking=settings.deepseek_thinking,
             reasoning_effort=settings.deepseek_reasoning_effort,
         )
-        chat_model = FallbackChatModelClient(
-            primary=deepseek_client,
-            fallback=MockChatModelClient(),
-        )
+        if settings.enable_model_fallback:
+            chat_model = FallbackChatModelClient(
+                primary=deepseek_client,
+                fallback=MockChatModelClient(),
+            )
+        else:
+            chat_model = deepseek_client
 
     memory_extraction_service = None
     if settings.enable_long_term_memory:
@@ -131,15 +135,23 @@ def _bootstrap_accounts(*, settings: Settings, store: StoreFacade) -> None:
             account_id=settings.dev_auth_user_id,
             dev_token_hash=hash_dev_token(settings.dev_auth_token),
         )
+    else:
+        account_service.set_dev_token_hash(
+            account_id=settings.dev_auth_user_id,
+            dev_token_hash=None,
+        )
+
+
+def build_app_logger(settings: Settings) -> AppLoggerPort:
+    if settings.enable_app_log:
+        return JsonlAppLogger(root_dir=settings.app_log_root)
+    return NoopAppLogger()
 
 
 def build_agent_service(
     settings: Settings | None = None,
 ) -> tuple[AgentService, MemoryAdminService, Settings, StoreFacade]:
     controller, memory_admin, resolved_settings, store = build_controller(settings=settings)
-    if resolved_settings.enable_app_log:
-        app_logger = JsonlAppLogger(root_dir=resolved_settings.app_log_root)
-    else:
-        app_logger = NoopAppLogger()
+    app_logger = build_app_logger(resolved_settings)
     service = AgentService(controller=controller, app_logger=app_logger)
     return service, memory_admin, resolved_settings, store

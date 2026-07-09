@@ -38,7 +38,7 @@ class AgentService:
             session_id=request.session_id,
             character_id=request.character_id,
             message=request.message,
-            metadata=request.metadata,
+            metadata=self._turn_metadata(user_context=user_context, request=request),
         )
         try:
             output = self.controller.handle_user_message(turn_input)
@@ -120,3 +120,14 @@ class AgentService:
 
     def _duration_ms(self, started_at: float) -> float:
         return round((perf_counter() - started_at) * 1000, 3)
+
+    def _turn_metadata(
+        self,
+        *,
+        user_context: UserContext,
+        request: ChatRequest,
+    ) -> dict:
+        metadata = dict(request.metadata)
+        if user_context.request_id:
+            metadata["request_id"] = user_context.request_id
+        return metadata

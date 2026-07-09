@@ -16,8 +16,10 @@ def test_store_factory_selects_backend(tmp_path: Path):
     assert isinstance(sqlalchemy, SqlAlchemyStore)
 
 
-def test_settings_db_backend_defaults_to_sqlite_raw(monkeypatch):
+def test_settings_db_backend_defaults_to_sqlite_raw(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AEMEATH_DB_BACKEND", raising=False)
+    monkeypatch.setattr("app.config.load_dotenv", lambda: None)
 
     settings = Settings.from_env()
 

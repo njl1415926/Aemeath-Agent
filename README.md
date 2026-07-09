@@ -65,6 +65,57 @@ Useful CLI commands:
 /memory debug on|off
 ```
 
+## FastAPI Service
+
+Install API dependencies:
+
+```bash
+pip install -e .[dev,api]
+```
+
+For local dev-token auth, set:
+
+```env
+AEMEATH_DEV_AUTH_TOKEN=change-me-local-dev-token
+AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER=false
+AEMEATH_API_ENABLE_PROMPT_RUN_LOG=false
+AEMEATH_API_ENABLE_MODEL_FALLBACK=false
+```
+
+Start the API:
+
+```bash
+uvicorn app.api.server:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+`GET /health` is public. `/v1/*` endpoints require
+`Authorization: Bearer <dev token>` by default. Local default-user access is only enabled when
+`AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER=true`.
+
+For API runtime, prompt-run logging is disabled by default through
+`AEMEATH_API_ENABLE_PROMPT_RUN_LOG=false`. Prompt logs contain full prompt/message snapshots and
+should be treated as sensitive local debugging artifacts. Removing `AEMEATH_DEV_AUTH_TOKEN` from
+the environment revokes the configured dev token hash on startup for the configured
+`AEMEATH_DEV_AUTH_USER_ID`.
+
+API runtime disables model fallback by default through `AEMEATH_API_ENABLE_MODEL_FALLBACK=false`,
+so provider auth/rate-limit/timeout errors are surfaced as stable API errors instead of mock
+fallback responses. CLI runtime keeps graceful fallback enabled by default.
+
+Current v0.1 endpoints:
+
+```text
+GET  /health
+POST /v1/chat
+GET  /v1/sessions
+POST /v1/sessions
+GET  /v1/sessions/{session_id}/messages
+```
+
+`POST /v1/chat` is synchronous and calls the service layer. If the supplied `session_id` does not
+exist yet, v0.1 follows the existing runtime behavior and creates it through `ensure_session`.
+Token-by-token streaming is deferred for a future `/v1/chat/stream` endpoint.
+
 ## DeepSeek Runtime
 
 To call DeepSeek, edit `.env`:

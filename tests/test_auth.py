@@ -45,6 +45,34 @@ def test_dev_token_resolves_to_user_context(settings):
     assert "correct-dev-token" not in json.dumps(user_context.metadata)
 
 
+@pytest.mark.parametrize("db_backend", ["sqlite_raw", "sqlalchemy"])
+def test_unset_dev_token_revokes_previously_stored_token(settings, db_backend: str):
+    token_settings = replace(
+        settings,
+        db_backend=db_backend,
+        dev_auth_token="old-dev-token",
+        dev_auth_user_id="revoked_user",
+    )
+    _service, _memory_admin, _resolved_settings, store = build_agent_service(
+        settings=token_settings
+    )
+    auth_service = AuthService(AccountService(store))
+    assert auth_service.resolve_bearer_token("old-dev-token").user_id == "revoked_user"
+
+    revoked_settings = replace(token_settings, dev_auth_token=None)
+    _service, _memory_admin, _resolved_settings, revoked_store = build_agent_service(
+        settings=revoked_settings
+    )
+    revoked_auth_service = AuthService(AccountService(revoked_store))
+
+    with pytest.raises(AuthInvalidCredentialsError):
+        revoked_auth_service.resolve_bearer_token("old-dev-token")
+
+    account = revoked_store.get_account(account_id="revoked_user")
+    assert account is not None
+    assert account.dev_token_hash is None
+
+
 def test_wrong_or_missing_dev_token_maps_to_auth_errors(settings):
     service_settings = replace(settings, dev_auth_token="correct-dev-token")
     _service, _memory_admin, _resolved_settings, store = build_agent_service(

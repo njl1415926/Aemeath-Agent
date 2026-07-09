@@ -1482,3 +1482,113 @@ Manager review:
 Follow-up review requests:
 - Memory module review: passed on 2026-07-07.
 - Session module review: passed on 2026-07-07 after the `list_sessions` ordering fix.
+
+### T-0128 FastAPI Service v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 11: FastAPI Service v0.1
+
+Goal:
+- Add the first HTTP API adapter around the existing service/auth/session/error/logging
+  boundaries.
+- Keep `DialogueController` free of HTTP, token, cookie, account, and permission logic.
+- Do not add Web UI, streaming, username/password login, OAuth, refresh tokens, PostgreSQL,
+  Alembic, Docker, or runtime strategy changes.
+
+Scope:
+- Added `app/api/` with `create_app(settings: Settings | None = None)`.
+- Added versioned endpoints:
+  - `GET /health`
+  - `POST /v1/chat`
+  - `GET /v1/sessions`
+  - `POST /v1/sessions`
+  - `GET /v1/sessions/{session_id}/messages`
+- Added a thin `SessionService` for session/message HTTP boundary behavior.
+- Added `AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER=false`; `/v1/*` requires bearer token by default.
+- Added optional `api` dependency extra and FastAPI/httpx test dependencies in `dev`.
+- Documented API runtime and the current `POST /v1/chat` `ensure_session(...)` auto-create
+  behavior in `docs/fastapi_service.md` and README.
+
+Boundary:
+- Chat route calls `AgentService.handle_chat(...)`, not `DialogueController`.
+- Auth route dependency reuses `AuthService` / `LocalDefaultAccountResolver` and emits
+  `UserContext`.
+- API errors reuse `map_exception(...)`, `ErrorInfo.to_public_dict()`, and
+  `http_status_for_error(...)`.
+- FastAPI validation errors map to `INVALID_INPUT` and do not expose FastAPI `detail`.
+- API app logs record only summary fields and keep App Log, Trace Log, and Prompt Log separate.
+- Streaming remains deferred for a future `/v1/chat/stream`.
+
+Validation:
+- `pytest`: 161 passed
+- `ruff check .`: All checks passed
+- `python -m compileall -q app tests`: passed
+
+Manager review:
+- Accepted on 2026-07-08.
+- Re-ran `pytest -q tests/test_api.py`: 12 passed.
+- Re-ran `pytest`: 161 passed.
+- Re-ran `ruff check .`: All checks passed.
+- Re-ran `python -m compileall -q app tests`: passed.
+- Re-ran `git diff --check`: no whitespace errors, CRLF warnings only.
+- Confirmed chat route calls `AgentService.handle_chat(...)` and does not import
+  `DialogueController`.
+- Confirmed `/v1/*` auth defaults to bearer token and local default-user API access is explicit
+  opt-in via `AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER=true`.
+- Confirmed API errors reuse the existing error mapper/status helper and validation errors use
+  the stable `INVALID_INPUT` shape.
+- Confirmed session message listing rejects cross-user access through `SessionService`.
+
+Warnings:
+- Test run emits dependency/runtime warnings: FastAPI `TestClient` / Starlette deprecation and
+  Python 3.12 SQLite datetime adapter deprecation. These are non-blocking and do not affect the
+  FastAPI v0.1 acceptance.
+
+### T-0129 Architecture Review Follow-up Fixes
+
+Status: `done`
+
+Owner:
+- Manager Session
+
+Source:
+- `docs/agents_communication/architecture_workflow_review_v0_1.md`
+
+Goal:
+- Fix the high-priority and small medium-priority issues found by Architecture And Workflow Review
+  v0.1 before continuing with Streaming API.
+
+Scope:
+- Added `AEMEATH_API_ENABLE_PROMPT_RUN_LOG=false`.
+- FastAPI app factory now builds API runtime settings with prompt-run logging controlled by the
+  API-specific flag, keeping CLI local-debug behavior separate.
+- Startup now clears the configured dev user's `dev_token_hash` when `AEMEATH_DEV_AUTH_TOKEN` is
+  unset, making token removal revoke the previous dev token for that database/account.
+- `AgentService` now copies `UserContext.request_id` into `AgentTurnInput.metadata`, allowing
+  trace/prompt metadata to correlate with API request ids.
+- Memory worker failure handling now persists and prints sanitized mapped errors instead of raw
+  exception text.
+- FastAPI runtime disables model fallback by default through
+  `AEMEATH_API_ENABLE_MODEL_FALLBACK=false`, while CLI fallback remains enabled by default.
+- Updated README, `.env.example`, `docs/fastapi_service.md`, `docs/observability.md`, and
+  `docs/auth_and_permissions.md`.
+
+Deferred:
+- API/model fallback policy is resolved for v0.1: CLI fallback remains enabled by default, while
+  FastAPI fallback defaults to disabled through `AEMEATH_API_ENABLE_MODEL_FALLBACK=false`.
+- `PermissionService` remains future-only until a generic non-session permission boundary needs it.
+- Full docs drift cleanup remains a follow-up docs task.
+
+Validation:
+- `pytest -q tests/test_api.py`: 16 passed.
+- `pytest -q tests/test_api.py tests/test_auth.py tests/test_memory_worker.py`: 26 passed.
+- `pytest`: 168 passed.
+- `ruff check .`: All checks passed.
+- `python -m compileall -q app tests`: passed.
+- `git diff --check`: no whitespace errors, CRLF warnings only.
+
+Warnings:
+- FastAPI `TestClient` / Starlette deprecation warning remains.
+- Python 3.12 SQLite datetime adapter deprecation warning remains.
