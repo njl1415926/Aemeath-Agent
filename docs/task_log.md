@@ -323,6 +323,10 @@ Owner:
 
 状态：`todo`
 
+2026-07 current-state note: this backlog item is superseded by later Character v0.2 work.
+The current runtime defaults to `app/character/Aemeath.v0.2/` manifest via `CharacterRegistry`.
+Keep this historical task only as context for remaining character-document governance work.
+
 目标：
 
 - 将单一 YAML 角色卡升级为 manifest 驱动。
@@ -1592,3 +1596,233 @@ Validation:
 Warnings:
 - FastAPI `TestClient` / Starlette deprecation warning remains.
 - Python 3.12 SQLite datetime adapter deprecation warning remains.
+
+### T-0130 Lightweight Current-State Docs Refresh
+
+Status: `done`
+
+Owner:
+- Manager Session
+
+Source:
+- Architecture And Workflow Review v0.1 docs drift findings.
+
+Goal:
+- Refresh the most visible current-state documentation after FastAPI v0.1, SQLAlchemy persistence
+  v0.1, and architecture-review follow-up fixes.
+
+Scope:
+- Updated README validation count to the latest full test run.
+- Added current-state notes in `docs/architecture.md` clarifying that
+  `WorldInfoEvidenceProvider` is the active main-runtime evidence provider and that API model
+  fallback is disabled by default.
+- Updated `docs/interfaces.md` provider list to include the active `WorldInfoEvidenceProvider`.
+- Marked historical Character Manifest backlog item as superseded by later Character v0.2 work.
+
+Deferred:
+- Full rewrite of historical planning documents.
+- Large-scale encoding cleanup of older archived notes.
+
+Validation:
+- Documentation-only change; no runtime tests required.
+
+### T-0131 Embedding Foundation v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 13: Embedding Foundation
+
+Goal:
+- Extract embedding into a shared, provider-neutral foundation for Memory, RAG, Character examples,
+  and future context-budget selection.
+- Make vector-space identity explicit and prevent vectors from different signatures from mixing.
+
+Scope:
+- Added the batch-first `app/embeddings/` port, schemas, provider factory, profile loader,
+  qualification CLI, typed errors, and AppLogger integration.
+- Added SiliconFlow BGE-M3, local BGE-M3, and deterministic Hash providers.
+- Preserved `app/retrieval/embeddings.py` and legacy Memory methods for one compatibility release.
+- Added canonical profile packaging, path/digest validation, release gates, batch ordering, and safe
+  provider diagnostics.
+
+Release decision:
+- `deterministic_hash_v1` is approved for deterministic tests and explicit development.
+- `siliconflow_pro_bge_m3_v1` and `local_bge_m3_v1` remain `review`; runtime code must not bypass the
+  approval gate.
+- Provider failures never trigger an implicit Hash fallback.
+
+Validation:
+- Embedding delivery suite: 114 passed.
+- Delivery full suite: 282 passed.
+- Hash qualification, wheel resource packaging, Ruff, compileall, and diff checks passed.
+
+### T-0132 Canonical Embedding Artifact Persistence v0.1
+
+Status: `done`
+
+Owner:
+- Persistence Worker
+- RAG Worker review
+- Manager Session acceptance
+
+Goal:
+- Persist exact-signature, content-bound embedding artifacts for Memory and RAG without changing
+  their business workflows.
+- Keep raw SQLite and SQLAlchemy behavior aligned while preserving legacy evidence for one
+  compatibility release.
+
+Scope:
+- Added canonical artifact helpers and Memory/RAG artifact tables.
+- Artifact identity is `target id + signature fingerprint + purpose`; different spaces coexist.
+- Added content hash, canonical signature JSON, vector format/dimension, vector digest, and stale or
+  corrupt artifact validation.
+- Added SQL fingerprint/purpose prefiltering, SQLite writer serialization, and raw/SQLAlchemy
+  concurrency parity.
+- Added strict SQLAlchemy artifact schema inspection with `STORAGE_MIGRATION_REQUIRED` for incomplete
+  experimental databases.
+- Migrates only byte-for-byte verified legacy deterministic Hash vectors. Other legacy rows remain
+  isolated and diagnosable without blocking startup.
+- RAG migration cleanup is idempotent, including databases whose migration marker already exists.
+
+Boundary:
+- `MemoryReader`, Memory extraction policy, Session behavior, `DialogueController`, and active
+  `WorldInfoEvidenceProvider` behavior were not changed.
+- Canonical APIs are parallel to the legacy APIs and become active only through later Memory/RAG
+  integration tasks.
+
+Validation:
+- Persistence worker full suite: passed.
+- Manager full regression during review: 304 passed.
+- Final RAG review: 34 passed; no blocking or non-blocking findings.
+- Ruff, compileall, and diff checks passed.
+
+Manager review:
+- Accepted on 2026-07-26 after Persistence fixed exact legacy-row accounting and idempotent RAG
+  temporary-table cleanup.
+- RAG independently confirmed verified-Hash suppression, BGE/unknown/corrupt legacy reporting,
+  namespace isolation, compatibility entry points, and repeated migration initialization.
+
+### T-0133 Memory Canonical Embedding Integration
+
+Status: `done`
+
+Owner:
+- Worker Session 3: Memory
+- Persistence Worker for approved store-contract additions
+
+Goal:
+- Move Memory extraction and recall from compatibility methods to exact-signature canonical
+  artifacts without changing `DialogueController` or Memory scope/provenance rules.
+
+Approved direction:
+- Commit Memory facts before generating derived document artifacts.
+- Derive pending state from active Memories lacking a valid artifact for the selected exact
+  signature; do not add a pending table in the first version.
+- Batch document embedding, idempotent artifact upsert, and bounded single-worker repair.
+- Use exact-signature vector recall; when coverage is incomplete or query embedding fails, use
+  explicit keyword supplementation without comparing keyword scores to cosine scores.
+- Preserve explicit Chinese recall fallback behavior.
+- Remove synthetic query warmup and wire Memory/embedding business events through AppLogger without
+  logging content, queries, vectors, hashes, provider bodies, or secrets.
+
+Required contract work:
+- Completed by Persistence: atomic exact-active Memory create-or-get with stable scope/content
+  identity, including raw/SQLAlchemy partial unique expression-index enforcement and fail-fast handling
+  of legacy duplicate active identities.
+- Completed by Persistence: eligible Memory count using the same scope, namespace, type, and confidence
+  filters as canonical recall.
+- Completed by Persistence: stable, bounded exact-signature artifact-gap listing for repair. The API is
+  Worker-internal, can scan across users, and has no scheduling/retry policy.
+- Provider-neutral query embedding source returning an exact signature and vector.
+- Repair cadence/backoff and unambiguous fact/artifact result fields.
+
+Dependency:
+- T-0131 and T-0132 are complete.
+- SiliconFlow remains unavailable to normal runtime until its profile receives separate approval.
+
+Manager review:
+- Persistence prelude accepted on 2026-07-26 after strict raw SQLite/SQLAlchemy parity review.
+- The active-memory identity gate now verifies SQLite index metadata, exact key expressions, and an
+  exact partial predicate while preserving single-quoted literal case, whitespace, escaped quotes,
+  and literal-contained parentheses during normalization.
+- Contract coverage confirms malformed expanded, narrowed, and literal-mutated indexes fail with
+  `STORAGE_MIGRATION_REQUIRED`; archived identities remain recreatable after restart.
+- Memory reader, extractor, repair, worker, and observability integration was delivered on
+  2026-07-26.
+- Manager runtime review confirmed the Extractor, Repair, Worker, observability, Persistence, and
+  cross-module boundaries, but requested two focused Reader fixes before final acceptance:
+  canonicalize direct query text with the same NFC/LF rules used for document artifacts, and
+  re-check hydrated vector records against active/status and query filters before prompt use.
+- Final Manager acceptance completed on 2026-07-26 after both Reader fixes landed. Regression coverage
+  now includes NFC and CRLF/LF-equivalent query recall plus archive/disable races between vector search
+  and record hydration; invalidated records are neither returned nor marked as used.
+- T-0133 is complete. Approved-profile expansion, multi-worker repair coordination, extraction-job
+  retry, and shared-turn query embedding remain separate follow-up work rather than acceptance gaps.
+
+### T-0134 RAG Canonical Managed Generation Runtime
+
+Status: `done`
+
+Owner:
+- Worker Session 2: Retrieval / RAG
+- Persistence Worker for the completed generation-store prerequisite interfaces
+
+Goal:
+- Adapt vector RAG to the approved Embedding Foundation and canonical artifact store without
+  replacing the active `WorldInfoEvidenceProvider`.
+- Guarantee that query-time retrieval uses one exact-signature, complete, immutable ready
+  generation and never mixes vector spaces or half-built artifacts.
+
+Scope:
+- Added canonical corpus inventory and retrieval-metadata fingerprints.
+- Added isolated SQLite generation directories, file manifests, checkpoints, OS process locking,
+  and atomic active-generation mapping.
+- Added batch-first document builds, full/incremental rebuild selection, stale chunk deletion,
+  interruption resume, ready validation, and provider-neutral canonical query retrieval.
+- Added standalone `build`, `status`, and `query` tooling under
+  `app.retrieval.manage_rag_index`; no vector provider was wired into `app/main.py`.
+- Kept legacy RAG APIs as one-release compatibility shims and prohibited legacy vector promotion
+  into managed generations.
+
+Initial Manager review:
+- Rejected on 2026-07-27 because corrupted ready generations could be reactivated, incomplete
+  generation directories blocked the index, changed write batch size could resume an incompatible
+  batch-index checkpoint, staging resume skipped inventory validation, and failed active-file
+  verification did not restore the previous active bytes.
+
+Review revision:
+- Added one `validate_ready_generation()` path used by registry resolution, no-op, ready reuse,
+  activation, and future rollback activation.
+- Ready validation now checks inventory identity/order/fingerprint, read-only SQLite integrity,
+  WAL state, exact-signature coverage, and zero artifact diagnostics.
+- Corrupt or incomplete non-active generation directories are isolated with safe diagnostics;
+  generation numbers are allocated from all valid directory-name prefixes.
+- Added `write_batch_size` to build-plan identity so a changed batch partition never consumes an
+  old batch-index checkpoint.
+- Staging resume validates persisted inventory before any ready transition.
+- Active-file replacement now snapshots and restores the previous bytes when reopen verification
+  fails.
+- Canonical retrieval returns `index_corrupt` with no hits when artifact diagnostics appear.
+
+Boundary:
+- Persistence schema and prerequisite APIs were not changed.
+- Memory, Session, Controller, and Character behavior were not changed.
+- `app/main.py` continues to use `WorldInfoEvidenceProvider`; managed vector RAG activation still
+  requires a separate Manager decision.
+
+Validation:
+- Focused RAG generation/Persistence suite: 31 passed.
+- Full suite after review revision: 380 passed.
+- Ruff, compileall, and diff checks passed; diff check reported CRLF conversion warnings only.
+
+Final Manager acceptance:
+- Accepted on 2026-07-27 after independently re-running the focused and full regression suites and
+  reviewing all six fault-injection scenarios. No blocking or non-blocking correctness findings
+  remain in the approved T-0134 scope.
+- Full ready-generation validation currently runs during registry resolution. Before managed RAG is
+  wired into the dialogue hot path, benchmark this behavior and, if needed, add a correctness-safe
+  validated-handle cache keyed by immutable active-generation identity.
+- BGE-M3/SiliconFlow profile approval, production corpus build review, and active
+  `EvidenceProviderPort` composition remain separate follow-up gates. The World Info provider stays
+  active until those gates are explicitly approved.

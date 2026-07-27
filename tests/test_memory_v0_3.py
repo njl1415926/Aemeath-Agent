@@ -5,10 +5,17 @@ from dataclasses import replace
 
 import pytest
 
+from app.embeddings.artifacts import (
+    EmbeddingArtifactWrite,
+    canonicalize_embedding_text,
+    embedding_content_hash,
+)
+from app.embeddings.schemas import EmbeddingRequest
 from app.main import build_controller
 from app.memory.admin import MemoryAdminService
 from app.memory.extractor import MemoryExtractionError, MemoryExtractionService
 from app.memory.jobs import build_memory_job_idempotency_key
+from app.memory.schemas import MemoryArtifactEligibility
 from app.retrieval.embeddings import DeterministicHashEmbeddingProvider
 from app.schemas import AgentTurnInput, MessageRecord
 from app.utils.ids import new_id
@@ -138,6 +145,9 @@ def test_memory_extraction_service_writes_memory_and_embedding(controller_and_st
     )
 
     assert len(result.created_memory_ids) == 1
+    assert result.existing_memory_ids == []
+    assert result.artifact_written_memory_ids == result.created_memory_ids
+    assert result.embedding_pending_memory_ids == []
     memory = store.get_memory(memory_id=result.created_memory_ids[0])
     assert memory is not None
     assert memory.content == "用户喜欢吃火锅，尤其是辣锅。"
@@ -146,14 +156,19 @@ def test_memory_extraction_service_writes_memory_and_embedding(controller_and_st
     assert memory.source_job_id is None
     assert memory.source_message_ids == ["msg_1"]
     assert json.loads(memory.related_memory_ids or "[]") == []
-    hits = store.search_memory_embeddings(
-        user_id=settings.default_user_id,
-        character_id=settings.default_character_id,
-        session_id="session_test",
-        query_embedding=DeterministicHashEmbeddingProvider().embed_query("出去吃火锅"),
+    provider = DeterministicHashEmbeddingProvider()
+    query = provider.embed(EmbeddingRequest(texts=("出去吃火锅",), purpose="query"))
+    outcome = store.search_memory_embedding_artifacts(
+        eligibility=MemoryArtifactEligibility(
+            user_id=settings.default_user_id,
+            character_id=settings.default_character_id,
+            session_id="session_test",
+        ),
+        query_signature=query.signature,
+        query_embedding=query.vectors[0],
         limit=4,
     )
-    assert hits[0].memory_id == memory.id
+    assert outcome.hits[0].memory_id == memory.id
 
 
 def test_memory_extraction_service_rejects_malformed_json(controller_and_store):
@@ -285,11 +300,18 @@ def test_prompt_log_records_injected_memory_ids(settings):
         related_memory_ids=[],
     )
     embedder = DeterministicHashEmbeddingProvider()
-    store.upsert_memory_embedding(
+    canonical_content = canonicalize_embedding_text("用户喜欢吃火锅，尤其是辣锅。")
+    document = embedder.embed(
+        EmbeddingRequest(texts=(canonical_content,), purpose="document")
+    )
+    store.upsert_memory_embedding_artifact(
         memory_id=memory_id,
         user_id=resolved_settings.default_user_id,
-        embedding_model=embedder.model_name,
-        embedding=embedder.embed_query("用户喜欢吃火锅，尤其是辣锅。"),
+        artifact=EmbeddingArtifactWrite(
+            signature=document.signature,
+            content_hash=embedding_content_hash(canonical_content),
+            vector=document.vectors[0],
+        ),
     )
 
     controller.handle_user_message(

@@ -1,0 +1,12 @@
+{
+  "schema_version": "embedding-canary-set/v1",
+  "canary_set_version": "bge_m3_canary_v1",
+  "canaries": [
+    {"id": "zh_short", "text": "清晨的风吹过安静的湖面。"},
+    {"id": "en_short", "text": "A quiet lantern glows beside the old stone bridge."},
+    {"id": "mixed", "text": "星光 maps a gentle path across the water."},
+    {"id": "numbers", "text": "Archive sample 2048 contains seven neutral records."},
+    {"id": "question", "text": "怎样描述一场没有人物的春雨？"},
+    {"id": "technical", "text": "A normalized vector has unit Euclidean length."}
+  ]
+}

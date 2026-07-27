@@ -20,7 +20,14 @@ from app.db.session import (
     create_sqlite_engine,
     initialize_database,
 )
+from app.embeddings.artifacts import EmbeddingArtifactUpsertOutcome, EmbeddingArtifactWrite
+from app.embeddings.schemas import EmbeddingModelSignature
 from app.memory.schemas import (
+    ExactActiveMemoryResult,
+    MemoryArtifactEligibility,
+    MemoryEmbeddingArtifactGapCursor,
+    MemoryEmbeddingArtifactGapPage,
+    MemoryEmbeddingSearchOutcome,
     MemoryExtractionJobRecord,
     MemoryJobEnqueueResult,
     MemoryVectorSearchResult,
@@ -248,6 +255,45 @@ class SqlAlchemyStore:
     def get_memory(self, *, memory_id: str) -> MemoryRecord | None:
         return self.memories.get_memory(memory_id=memory_id)
 
+    def create_or_get_exact_active_memory(
+        self,
+        *,
+        user_id: str,
+        scope: str,
+        scope_character_id: str | None,
+        scope_session_id: str | None,
+        namespace: str,
+        memory_type: str,
+        content: str,
+        importance: int,
+        confidence: float,
+        source: str,
+        source_message_id: str | None,
+        source_session_id: str | None,
+        source_job_id: str | None,
+        source_message_ids: list[str] | None = None,
+        related_memory_ids: list[str] | None = None,
+        expiry: str | None = None,
+    ) -> ExactActiveMemoryResult:
+        return self.memories.create_or_get_exact_active_memory(
+            user_id=user_id,
+            scope=scope,
+            scope_character_id=scope_character_id,
+            scope_session_id=scope_session_id,
+            namespace=namespace,
+            memory_type=memory_type,
+            content=content,
+            importance=importance,
+            confidence=confidence,
+            source=source,
+            source_message_id=source_message_id,
+            source_session_id=source_session_id,
+            source_job_id=source_job_id,
+            source_message_ids=source_message_ids,
+            related_memory_ids=related_memory_ids,
+            expiry=expiry,
+        )
+
     def list_active_memories(self, *, user_id: str, limit: int = 50) -> list[MemoryRecord]:
         return self.memories.list_active_memories(user_id=user_id, limit=limit)
 
@@ -401,6 +447,51 @@ class SqlAlchemyStore:
             query_embedding=query_embedding,
             limit=limit,
             candidate_limit=candidate_limit,
+        )
+
+    def upsert_memory_embedding_artifact(
+        self,
+        *,
+        memory_id: str,
+        user_id: str,
+        artifact: EmbeddingArtifactWrite,
+    ) -> EmbeddingArtifactUpsertOutcome:
+        return self.memory_embeddings.upsert_memory_embedding_artifact(
+            memory_id=memory_id,
+            user_id=user_id,
+            artifact=artifact,
+        )
+
+    def search_memory_embedding_artifacts(
+        self,
+        *,
+        eligibility: MemoryArtifactEligibility,
+        query_signature: EmbeddingModelSignature,
+        query_embedding: np.ndarray,
+        limit: int,
+        candidate_limit: int | None = None,
+    ) -> MemoryEmbeddingSearchOutcome:
+        return self.memory_embeddings.search_memory_embedding_artifacts(
+            eligibility=eligibility,
+            query_signature=query_signature,
+            query_embedding=query_embedding,
+            limit=limit,
+            candidate_limit=candidate_limit,
+        )
+
+    def list_memory_embedding_artifact_gaps(
+        self,
+        *,
+        query_signature: EmbeddingModelSignature,
+        user_id: str | None = None,
+        cursor: MemoryEmbeddingArtifactGapCursor | None = None,
+        limit: int = 50,
+    ) -> MemoryEmbeddingArtifactGapPage:
+        return self.memory_embeddings.list_memory_embedding_artifact_gaps(
+            query_signature=query_signature,
+            user_id=user_id,
+            cursor=cursor,
+            limit=limit,
         )
 
     def get_or_create_relationship_state(

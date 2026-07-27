@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import CheckConstraint, Float, Index, Integer, LargeBinary, Text
+from sqlalchemy import CheckConstraint, Float, Index, Integer, LargeBinary, Text, and_, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -115,6 +115,16 @@ class LongTermMemoryModel(Base):
             "is_active",
         ),
         Index("idx_memories_source_job", "source_job_id"),
+        Index(
+            "uq_memories_active_exact_identity",
+            "user_id",
+            "scope",
+            func.coalesce(scope_character_id, ""),
+            func.coalesce(scope_session_id, ""),
+            "content",
+            unique=True,
+            sqlite_where=and_(status == "active", is_active == 1),
+        ),
     )
 
 
@@ -156,6 +166,40 @@ class LongTermMemoryEmbeddingModel(Base):
 
     __table_args__ = (
         Index("idx_memory_embeddings_user", "user_id"),
+    )
+
+
+class LongTermMemoryEmbeddingArtifactModel(Base):
+    __tablename__ = "long_term_memory_embedding_artifacts"
+
+    memory_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_signature_json: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_signature_fingerprint: Mapped[str] = mapped_column(Text, primary_key=True)
+    embedding_purpose: Mapped[str] = mapped_column(Text, primary_key=True)
+    embedding_content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_vector_format: Mapped[str] = mapped_column(Text, nullable=False)
+    vector_dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    embedding_vector_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint(
+            "embedding_purpose = 'document'",
+            name="ck_memory_embedding_artifact_purpose",
+        ),
+        CheckConstraint(
+            "embedding_vector_format = 'f32le-v1'",
+            name="ck_memory_embedding_artifact_vector_format",
+        ),
+        Index(
+            "idx_memory_embedding_artifacts_user_signature",
+            "user_id",
+            "embedding_signature_fingerprint",
+            "embedding_purpose",
+        ),
     )
 
 

@@ -117,6 +117,27 @@ CREATE TABLE IF NOT EXISTS long_term_memory_embeddings (
 CREATE INDEX IF NOT EXISTS idx_memory_embeddings_user
     ON long_term_memory_embeddings (user_id);
 
+CREATE TABLE IF NOT EXISTS long_term_memory_embedding_artifacts (
+    memory_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    embedding_signature_json TEXT NOT NULL,
+    embedding_signature_fingerprint TEXT NOT NULL,
+    embedding_purpose TEXT NOT NULL CHECK (embedding_purpose = 'document'),
+    embedding_content_hash TEXT NOT NULL,
+    embedding_vector_format TEXT NOT NULL CHECK (embedding_vector_format = 'f32le-v1'),
+    vector_dim INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    embedding_vector_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    PRIMARY KEY (memory_id, embedding_signature_fingerprint, embedding_purpose)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_embedding_artifacts_user_signature
+    ON long_term_memory_embedding_artifacts (
+        user_id, embedding_signature_fingerprint, embedding_purpose
+    );
+
 CREATE TABLE IF NOT EXISTS relationship_states (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,

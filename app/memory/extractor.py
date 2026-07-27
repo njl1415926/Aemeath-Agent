@@ -3,10 +3,21 @@ from __future__ import annotations
 import json
 import re
 
+from app.embeddings.artifacts import (
+    EmbeddingArtifactWrite,
+    canonicalize_embedding_text,
+    embedding_content_hash,
+)
+from app.embeddings.errors import EmbeddingInvalidResponseError
+from app.embeddings.ports import EmbeddingProviderPort
+from app.embeddings.schemas import EmbeddingRequest
+from app.errors import map_exception
+from app.memory.observability import record_memory_event
 from app.memory.schemas import ExtractedMemory, MemoryExtractionResult
 from app.memory.store import MemoryStore
 from app.model.client import ChatModelClient
-from app.retrieval.embeddings import EmbeddingProviderPort
+from app.observability.noop import NoopAppLogger
+from app.observability.ports import AppLoggerPort
 from app.schemas import MessageRecord
 
 EXTRACTION_SYSTEM_PROMPT = """你是 Aemeath Agent 的长期记忆提炼器。
@@ -57,10 +68,12 @@ class MemoryExtractionService:
         store: MemoryStore,
         model_client: ChatModelClient,
         embedding_provider: EmbeddingProviderPort,
+        app_logger: AppLoggerPort | None = None,
     ):
         self.store = store
         self.model_client = model_client
         self.embedding_provider = embedding_provider
+        self.app_logger = app_logger or NoopAppLogger()
 
     def extract_and_persist(
         self,
@@ -87,19 +100,12 @@ class MemoryExtractionService:
             trigger_type=trigger_type,
         )
         created_ids: list[str] = []
-        skipped: list[str] = []
+        existing_ids: list[str] = []
+        facts: list[tuple[str, str, str]] = []
+        seen_memory_ids: set[str] = set()
         for memory in extracted:
-            if self.store.has_exact_active_memory(
-                user_id=user_id,
-                scope="user_global",
-                scope_character_id=None,
-                scope_session_id=None,
-                content=memory.content,
-            ):
-                skipped.append(memory.content)
-                continue
             source_message_id = memory.source_message_ids[0] if memory.source_message_ids else None
-            memory_id = self.store.create_memory(
+            resolved = self.store.create_or_get_exact_active_memory(
                 user_id=user_id,
                 scope="user_global",
                 scope_character_id=None,
@@ -116,19 +122,99 @@ class MemoryExtractionService:
                 source_message_ids=list(dict.fromkeys(memory.source_message_ids)),
                 related_memory_ids=[],
             )
-            embedding = self.embedding_provider.embed_query(memory.content)
-            self.store.upsert_memory_embedding(
-                memory_id=memory_id,
-                user_id=user_id,
-                embedding_model=self.embedding_provider.model_name,
-                embedding=embedding,
-            )
-            created_ids.append(memory_id)
+            if resolved.memory_id in seen_memory_ids:
+                continue
+            seen_memory_ids.add(resolved.memory_id)
+            if resolved.created:
+                created_ids.append(resolved.memory_id)
+            else:
+                existing_ids.append(resolved.memory_id)
+            facts.append((resolved.memory_id, user_id, memory.content))
+
+        artifact_written_ids, pending_ids, embedding_error_code = self._persist_artifacts(
+            facts
+        )
+        if not pending_ids:
+            embedding_status = "complete"
+        elif artifact_written_ids:
+            embedding_status = "partial"
+        else:
+            embedding_status = "pending"
+        record_memory_event(
+            self.app_logger,
+            event_name="memory.extraction_completed",
+            level="warning" if pending_ids else "info",
+            error_code=embedding_error_code,
+            payload={
+                "provider": self.embedding_provider.signature.provider,
+                "profile_id": self.embedding_provider.signature.profile_id,
+                "trigger_type": trigger_type,
+                "created_memory_count": len(created_ids),
+                "existing_memory_count": len(existing_ids),
+                "artifact_written_count": len(artifact_written_ids),
+                "embedding_pending_count": len(pending_ids),
+                "embedding_status": embedding_status,
+            },
+            user_id=user_id,
+            session_id=session_id,
+            character_id=character_id,
+        )
         return MemoryExtractionResult(
             created_memory_ids=created_ids,
-            skipped_contents=skipped,
+            existing_memory_ids=existing_ids,
+            artifact_written_memory_ids=artifact_written_ids,
+            embedding_pending_memory_ids=pending_ids,
             extracted_memories=extracted,
         )
+
+    def _persist_artifacts(
+        self,
+        facts: list[tuple[str, str, str]],
+    ) -> tuple[list[str], list[str], str | None]:
+        if not facts:
+            return [], [], None
+        canonical_contents = [
+            canonicalize_embedding_text(content) for _memory_id, _user_id, content in facts
+        ]
+        try:
+            batch = self.embedding_provider.embed(
+                EmbeddingRequest(texts=tuple(canonical_contents), purpose="document")
+            )
+            if batch.signature.canonical() != self.embedding_provider.signature.canonical():
+                raise EmbeddingInvalidResponseError("document_signature_mismatch")
+            if batch.vectors.shape[0] != len(facts):
+                raise EmbeddingInvalidResponseError("document_result_count_mismatch")
+        except Exception as exc:
+            return [], [memory_id for memory_id, _user_id, _content in facts], map_exception(
+                exc
+            ).code.value
+
+        written_ids: list[str] = []
+        pending_ids: list[str] = []
+        error_code: str | None = None
+        for (memory_id, user_id, _content), canonical_content, vector in zip(
+            facts,
+            canonical_contents,
+            batch.vectors,
+            strict=True,
+        ):
+            try:
+                outcome = self.store.upsert_memory_embedding_artifact(
+                    memory_id=memory_id,
+                    user_id=user_id,
+                    artifact=EmbeddingArtifactWrite(
+                        signature=batch.signature,
+                        content_hash=embedding_content_hash(canonical_content),
+                        vector=vector,
+                    ),
+                )
+                if outcome.status in {"created", "replaced"}:
+                    written_ids.append(memory_id)
+            except Exception as exc:
+                pending_ids.append(memory_id)
+                if error_code is None:
+                    error_code = map_exception(exc).code.value
+        return written_ids, pending_ids, error_code
 
     def extract_memories(
         self,

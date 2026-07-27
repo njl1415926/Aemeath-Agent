@@ -89,7 +89,7 @@ Boundary:
 - `app/services/schemas.py`
 - `app/services/agent_service.py`
 
-`AgentService` is the stable application boundary for CLI, future API, future Web, streaming,
+`AgentService` is the stable application boundary for CLI, FastAPI, future Web, streaming,
 and optional post-response adapters. It wraps the internal turn contract without moving
 Character, Memory, RAG, Prompt, Model, State, or Session policy out of their modules.
 
@@ -104,8 +104,9 @@ class UserContext:
     metadata: dict[str, Any] = field(default_factory=dict)
 ```
 
-`UserContext` is the future Auth insertion point. v0.1 only requires `user_id`; roles and
-metadata are carried for future adapters and must not be treated as a full permission model.
+`UserContext` is the Auth insertion point for FastAPI and future adapters. v0.1 only requires
+`user_id`; roles and metadata are carried for adapters and must not be treated as a full
+permission model.
 
 ### ChatRequest
 
@@ -158,7 +159,7 @@ class AgentService:
         ...
 ```
 
-Success returns `ChatResponse`. Failure re-raises the original exception. CLI and future API
+Success returns `ChatResponse`. Failure re-raises the original exception. CLI and FastAPI
 adapters should use `map_exception(exc)` and `ErrorInfo.to_public_dict()` instead of relying on
 raw exception text or introducing `ServiceResult` / `ServiceError`.
 
@@ -535,6 +536,9 @@ class EvidenceProviderPort(Protocol):
 
 - `EmptyEvidenceProvider`
 - `CompositeEvidenceProvider`
+- `WorldInfoEvidenceProvider`，当前主运行时 active provider
+
+`EmptyEvidenceProvider` 仅用于测试或显式关闭外部证据的运行方式，不再是 `app/main.py` 的默认 provider。
 
 ### RetrievalResult
 
@@ -689,7 +693,7 @@ Position:
 
 ### ErrorCode
 
-`ErrorCode` is the stable machine-readable error category used by CLI, future API adapters,
+`ErrorCode` is the stable machine-readable error category used by CLI, FastAPI adapters,
 trace records, and prompt-run failure logs. Codes currently cover:
 
 - generic runtime and invalid input;
@@ -719,11 +723,11 @@ sanitized logs and traces.
 
 - `AemeathError` lets business modules raise a stable code plus public message.
 - `map_exception(exc)` converts known exceptions into `ErrorInfo`.
-- `http_status_for_error(error_info)` maps `ErrorInfo` into a future HTTP status code.
+- `http_status_for_error(error_info)` maps `ErrorInfo` into HTTP status codes for FastAPI and
+  future HTTP adapters.
 - Current CLI code uses the same mapping but does not depend on FastAPI.
 
-Future Service/API layers should reuse these interfaces instead of creating a second error
-taxonomy.
+Service/API layers should reuse these interfaces instead of creating a second error taxonomy.
 
 ### Sanitizer
 
@@ -831,8 +835,8 @@ not over-redact ordinary field names such as `ordinary-key`.
 - `memory_extraction_jobs`：长期记忆提炼 job queue，含 `idempotency_key`、
   `status`、`trigger_type`、`source_message_ids_json`、`input_json`、`result_json`、
   `error`、`attempt_count`、`locked_by`、`locked_at` 等字段。
-- `long_term_memory_embeddings`：每条长期记忆的 embedding，按 `memory_id` 主键并以
-  `user_id` 和所属 memory scope 过滤召回。
+- `long_term_memory_embedding_artifacts`：每条长期记忆可以按 exact canonical signature
+  共存多个 `document` artifact；`long_term_memory_embeddings` 仅保留一个兼容版本。
 - `long_term_memories` 增加 `scope`、`scope_character_id`、`scope_session_id`；
   来源单独记录在 `source_session_id`、`source_job_id`、`source_message_ids_json`。
 - `schema_migrations` 记录一次性正式迁移；旧记忆迁为 `user_global`，保持跨 Session
@@ -843,10 +847,13 @@ not over-redact ordinary field names such as `ordinary-key`.
 - `QueuedMemoryWriter.persist_decision(...)` 将显式记忆触发写为 `hard` job。
 - `QueuedMemoryWriter.enqueue_window_if_due(...)` 在当前 session 有至少
   `AEMEATH_MEMORY_WINDOW_SIZE` 条未处理消息时写入 `window` job。
-- `MemoryExtractionService` 使用 `ChatModelClient` 输出 JSON memories，再写入
-  `long_term_memories` 和 `long_term_memory_embeddings`。
-- `MemoryReader` 在配置 embedding provider 后每轮主动向量召回，返回
+- `MemoryExtractionService` 使用 `ChatModelClient` 输出 JSON memories，先通过
+  `create_or_get_exact_active_memory(...)` 提交事实，再批量写 canonical document artifacts。
+- `MemoryReader` 通过 provider-neutral `QueryEmbeddingSourcePort` 每轮主动查询 exact
+  signature artifact，返回
   `MemorySearchResult(match_reason="embedding_similarity")`。
+- coverage 不完整时 vector 结果优先、keyword 只补位，不比较两种分数；query embedding
+  失败或无有效向量命中时执行 keyword fallback，显式中文回忆保留 active-memory fallback。
 - 关键词召回、向量召回和 fallback 共享 scope visibility：
   `user_global` 对同一用户可见，`character` 还需角色匹配，`session` 还需 Session 匹配。
 - 精确去重严格匹配待写入 memory 的
@@ -856,16 +863,19 @@ not over-redact ordinary field names such as `ordinary-key`.
 配置：
 
 - `AEMEATH_ENABLE_LONG_TERM_MEMORY`
-- `AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash|bge-m3`
-- `AEMEATH_MEMORY_EMBEDDING_MODEL_PATH`
+- `AEMEATH_EMBEDDING_PROFILE`
+- `AEMEATH_EMBEDDING_ALLOW_HASH`
 - `AEMEATH_MEMORY_RECALL_TOP_K`
 - `AEMEATH_MEMORY_RECALL_THRESHOLD`
 - `AEMEATH_MEMORY_WORKER_POLL_INTERVAL_SECONDS`
+- `AEMEATH_MEMORY_REPAIR_BATCH_SIZE`
+- `AEMEATH_MEMORY_REPAIR_INTERVAL_SECONDS`
+- `AEMEATH_MEMORY_REPAIR_MAX_BACKOFF_SECONDS`
 - `AEMEATH_MEMORY_WINDOW_SIZE`
 - `AEMEATH_ENABLE_MEMORY_WINDOW_EXTRACTION`
 
-默认 embedding provider 是 `hash`，用于基础安装和测试。真实语义召回需要显式设置
-`bge-m3` 并确保本地模型依赖可用。
+Provider 必须来自 approved profile 并经过统一 Factory；配置错误 fail-fast，不隐式切换
+Hash。`AEMEATH_MEMORY_EMBEDDING_PROVIDER` 和模型路径旧名称只保留一个兼容版本。
 
 CLI 调试命令：
 
@@ -884,6 +894,68 @@ CLI 调试命令：
 
 - `DialogueController` 仍只调用 memory ports。
 - Interaction memory 不进入 `EvidencePack.memory_results`。
+
+### Embedding Foundation And Canonical Artifact Interfaces
+
+`app/embeddings/ports.py` defines the shared batch-first `EmbeddingProviderPort`:
+
+```python
+embed(request: EmbeddingRequest) -> EmbeddingBatchResult
+```
+
+`EmbeddingRequest.purpose` is explicitly `query` or `document`. Every result carries an exact
+`EmbeddingModelSignature`; equal dimensions do not make two signatures compatible. Provider
+runtime options such as timeout, retry count, batch size, local device, and API credentials are not
+part of artifact identity.
+
+Profiles are selected through `AEMEATH_EMBEDDING_PROFILE`. The factory accepts only repository-owned
+canonical profiles whose release status is `approved`. The old
+`AEMEATH_MEMORY_EMBEDDING_PROVIDER` and `AEMEATH_MEMORY_EMBEDDING_MODEL_PATH` settings remain a
+one-release Memory compatibility path and must not define new canonical vector spaces.
+
+`MemoryStore` currently exposes both legacy and canonical methods:
+
+- compatibility: `upsert_memory_embedding(...)`, `search_memory_embeddings(...)`;
+- canonical: `upsert_memory_embedding_artifact(...)`,
+  `search_memory_embedding_artifacts(...)`,
+  `create_or_get_exact_active_memory(...)`, and
+  `list_memory_embedding_artifact_gaps(...)`.
+
+Canonical Memory search accepts `MemoryArtifactEligibility` and returns
+`MemoryEmbeddingSearchOutcome(hits, diagnostics, eligible_memory_count)`. Its coverage count and
+artifact candidates share the same owner, scope, namespace, type, confidence, active, and status
+predicates in one read snapshot. Persistence filters by owner/scope, signature fingerprint, and
+`document` purpose in SQL, then validates the complete signature and artifact bytes before scoring.
+Different signatures coexist and are never cross-scored.
+
+`create_or_get_exact_active_memory(...)` atomically resolves an active identity of
+`user_id + scope + scope_character_id + scope_session_id + content` and returns
+`ExactActiveMemoryResult(memory_id, created)`. A reuse preserves the original Memory fields;
+archived or disabled rows do not prevent a new active row. The persistence invariant is a partial
+unique expression index over that identity.
+
+`list_memory_embedding_artifact_gaps(...)` takes a full `EmbeddingModelSignature` and returns
+bounded, stable keyset pages of active Memories lacking a valid exact-signature `document`
+artifact. Its reason is one of `missing`, `content_stale`, `vector_corrupt`,
+`signature_corrupt`, or `legacy_only`. It is an internal Worker API: its default scan may cross
+users for repair work, but it must not be exposed through Service, FastAPI, or MCP. It does not
+schedule repair, retry, fallback, or rebuild work.
+
+`SqliteVectorStore` provides the equivalent RAG artifact operations while retaining
+`upsert_chunks(...)` and `search(...)` as one-release compatibility entry points. Namespace filters
+must apply to both returned hits and aggregate diagnostics.
+
+`QueryEmbeddingSourcePort.resolve(...)` returns provider-neutral
+`ResolvedQueryEmbedding(signature, vector)`. The first implementation is
+`DirectQueryEmbeddingSource`, which makes one batch-first `query` request. A later shared-turn
+implementation may consume `TurnSemanticContext` without changing `MemoryReader`.
+
+`MemoryExtractionResult` and persisted job results distinguish
+`created_memory_ids`, `existing_memory_ids`, `artifact_written_memory_ids`, and
+`embedding_pending_memory_ids`. `MemoryEmbeddingRepairService` consumes bounded exact-signature
+gap pages; pending is derived and does not add another persistence table.
+
+These additions must not expose vectors or provider details to `DialogueController`.
 - 当前自动提炼仍创建 `user_global` memory。`character` / `session` scope 已具备存储和召回
   契约，未来 scope classifier 另行设计。
 
@@ -950,7 +1022,7 @@ Runtime configuration:
 
 ### AppLogRecord
 
-Application log records are for process and boundary events, such as CLI startup, future API
+Application log records are for process and boundary events, such as CLI startup, FastAPI
 request handling, worker lifecycle events, and operational failures. They are separate from agent
 turn trace events and prompt-run logs.
 

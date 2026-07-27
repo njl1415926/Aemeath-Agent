@@ -5,8 +5,10 @@ from pathlib import Path
 from threading import Barrier
 
 from app.db.sqlalchemy_store import SqlAlchemyStore
+from app.embeddings.schemas import EmbeddingRequest
 from app.memory.extractor import MemoryExtractionService
 from app.memory.mock_extractor import MockMemoryExtractionModelClient
+from app.memory.schemas import MemoryArtifactEligibility
 from app.memory.worker import _messages_for_job
 from app.retrieval.embeddings import DeterministicHashEmbeddingProvider
 
@@ -52,7 +54,9 @@ def test_sqlalchemy_enabled_worker_single_job_smoke(tmp_path: Path):
         job_id=job.id,
         result_payload={
             "created_memory_ids": result.created_memory_ids,
-            "skipped_contents": result.skipped_contents,
+            "existing_memory_ids": result.existing_memory_ids,
+            "artifact_written_memory_ids": result.artifact_written_memory_ids,
+            "embedding_pending_memory_ids": result.embedding_pending_memory_ids,
         },
     )
 
@@ -60,7 +64,9 @@ def test_sqlalchemy_enabled_worker_single_job_smoke(tmp_path: Path):
     assert completed.status == "completed"
     assert completed.result_payload == {
         "created_memory_ids": result.created_memory_ids,
-        "skipped_contents": [],
+        "existing_memory_ids": [],
+        "artifact_written_memory_ids": result.created_memory_ids,
+        "embedding_pending_memory_ids": [],
     }
     assert len(result.created_memory_ids) == 1
 
@@ -71,14 +77,18 @@ def test_sqlalchemy_enabled_worker_single_job_smoke(tmp_path: Path):
     assert memory.source_job_id == job.id
     assert memory.source_message_ids == [message_id]
 
-    hits = store.search_memory_embeddings(
-        user_id="user_1",
-        character_id="aemeath",
-        session_id=session.id,
-        query_embedding=embedder.embed_query("红茶"),
+    query = embedder.embed(EmbeddingRequest(texts=("红茶",), purpose="query"))
+    outcome = store.search_memory_embedding_artifacts(
+        eligibility=MemoryArtifactEligibility(
+            user_id="user_1",
+            character_id="aemeath",
+            session_id=session.id,
+        ),
+        query_signature=query.signature,
+        query_embedding=query.vectors[0],
         limit=4,
     )
-    assert [hit.memory_id for hit in hits] == [memory.id]
+    assert [hit.memory_id for hit in outcome.hits] == [memory.id]
 
 
 def test_sqlalchemy_two_store_instances_claim_one_pending_job_once(tmp_path: Path):

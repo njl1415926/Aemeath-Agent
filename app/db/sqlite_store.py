@@ -9,7 +9,41 @@ from typing import Any
 import numpy as np
 
 from app.accounts.schemas import AccountRecord, AccountStatus
+from app.db.errors import StorageMigrationRequiredError
+from app.db.memory_artifact_contract import (
+    StoredMemoryEmbeddingArtifact,
+    classify_memory_embedding_artifact_gap,
+)
+from app.db.sqlite_index_contract import (
+    ACTIVE_MEMORY_IDENTITY_INDEX,
+    has_valid_active_memory_identity_index,
+)
+from app.embeddings.artifacts import (
+    EmbeddingArtifactDiagnostics,
+    EmbeddingArtifactUpsertOutcome,
+    EmbeddingArtifactValidationError,
+    EmbeddingArtifactWrite,
+    canonical_content_hash,
+    canonicalize_embedding_text,
+    deterministic_hash_v1_legacy_signature,
+    diagnostics_from_reasons,
+    embedding_content_hash,
+    is_promoted_deterministic_hash_legacy,
+    prepare_embedding_artifact,
+    prepare_embedding_query,
+    validate_stored_embedding_artifact,
+)
+from app.embeddings.config import load_embedding_space_profile
+from app.embeddings.errors import EmbeddingError
+from app.embeddings.providers.hash import DeterministicHashEmbeddingProvider
+from app.embeddings.schemas import EmbeddingModelSignature, EmbeddingRequest
 from app.memory.schemas import (
+    ExactActiveMemoryResult,
+    MemoryArtifactEligibility,
+    MemoryEmbeddingArtifactGap,
+    MemoryEmbeddingArtifactGapCursor,
+    MemoryEmbeddingArtifactGapPage,
+    MemoryEmbeddingSearchOutcome,
     MemoryExtractionJobRecord,
     MemoryJobEnqueueResult,
     MemoryVectorSearchResult,
@@ -27,6 +61,10 @@ from app.session.schemas import SessionRecord, SessionStatus
 from app.utils.ids import new_id, utc_now
 
 MEMORY_SCOPE_MIGRATION_VERSION = "memory_scope_provenance_v1"
+MEMORY_EMBEDDING_ARTIFACT_MIGRATION_VERSION = "memory_embedding_artifact_v1"
+MEMORY_EXACT_ACTIVE_IDENTITY_MIGRATION_VERSION = "memory_exact_active_identity_v1"
+_MAX_MEMORY_ARTIFACT_GAP_LIMIT = 100
+_MAX_MEMORY_ARTIFACT_GAP_SCAN_LIMIT = 400
 DEFAULT_ACCOUNT_ID = "user_default"
 DEFAULT_ACCOUNT_ROLES_JSON = json.dumps(["user"], ensure_ascii=True)
 
@@ -57,6 +95,163 @@ class SQLiteStore:
             self._backfill_accounts(conn)
             conn.commit()
             self._migrate_memory_scope_provenance(conn)
+            self._migrate_memory_exact_active_identity(conn)
+            self._migrate_memory_embedding_artifacts(conn)
+
+    def _has_valid_active_memory_identity_index(self, conn: sqlite3.Connection) -> bool:
+        index_list_rows = conn.execute(
+            "PRAGMA index_list('long_term_memories')"
+        ).fetchall()
+        index_xinfo_rows = conn.execute(
+            f"PRAGMA index_xinfo('{ACTIVE_MEMORY_IDENTITY_INDEX}')"
+        ).fetchall()
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (ACTIVE_MEMORY_IDENTITY_INDEX,),
+        ).fetchone()
+        return has_valid_active_memory_identity_index(
+            index_list_rows=index_list_rows,
+            index_xinfo_rows=index_xinfo_rows,
+            index_sql=row["sql"] if row is not None else None,
+        )
+
+    def _migrate_memory_exact_active_identity(self, conn: sqlite3.Connection) -> None:
+        applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (MEMORY_EXACT_ACTIVE_IDENTITY_MIGRATION_VERSION,),
+        ).fetchone()
+        if applied:
+            if not self._has_valid_active_memory_identity_index(conn):
+                raise StorageMigrationRequiredError(
+                    reason="raw_active_memory_identity_index_invalid"
+                )
+            return
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            duplicate = conn.execute(
+                """
+                SELECT 1
+                FROM long_term_memories
+                WHERE status = 'active' AND is_active = 1
+                GROUP BY
+                    user_id,
+                    scope,
+                    COALESCE(scope_character_id, ''),
+                    COALESCE(scope_session_id, ''),
+                    content
+                HAVING COUNT(*) > 1
+                LIMIT 1
+                """
+            ).fetchone()
+            if duplicate is not None:
+                raise StorageMigrationRequiredError(
+                    reason="raw_active_memory_identity_duplicates"
+                )
+            if not self._has_valid_active_memory_identity_index(conn):
+                existing_index = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (ACTIVE_MEMORY_IDENTITY_INDEX,),
+                ).fetchone()
+                if existing_index is not None:
+                    raise StorageMigrationRequiredError(
+                        reason="raw_active_memory_identity_index_invalid"
+                    )
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX uq_memories_active_exact_identity
+                    ON long_term_memories (
+                        user_id,
+                        scope,
+                        COALESCE(scope_character_id, ''),
+                        COALESCE(scope_session_id, ''),
+                        content
+                    )
+                    WHERE status = 'active' AND is_active = 1
+                    """
+                )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (MEMORY_EXACT_ACTIVE_IDENTITY_MIGRATION_VERSION, utc_now()),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def _migrate_memory_embedding_artifacts(self, conn: sqlite3.Connection) -> None:
+        applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (MEMORY_EMBEDDING_ARTIFACT_MIGRATION_VERSION,),
+        ).fetchone()
+        if applied:
+            return
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            profile = load_embedding_space_profile("deterministic_hash_v1")
+            provider = DeterministicHashEmbeddingProvider(profile=profile)
+            rows = conn.execute(
+                """
+                SELECT e.memory_id, e.user_id, e.embedding_model, e.vector_dim, e.embedding,
+                       m.content
+                FROM long_term_memory_embeddings AS e
+                INNER JOIN long_term_memories AS m ON m.id = e.memory_id
+                WHERE e.user_id = m.user_id
+                """
+            ).fetchall()
+            for row in rows:
+                if row["embedding_model"] != "deterministic_hash_v1" or row["vector_dim"] != 384:
+                    continue
+                try:
+                    canonical_text = canonicalize_embedding_text(row["content"])
+                    result = provider.embed(
+                        EmbeddingRequest(texts=(canonical_text,), purpose="document")
+                    )
+                    artifact = prepare_embedding_artifact(
+                        EmbeddingArtifactWrite(
+                            signature=result.signature,
+                            content_hash=embedding_content_hash(canonical_text),
+                            vector=result.vectors[0],
+                        )
+                    )
+                    if bytes(row["embedding"]) != artifact.vector_bytes:
+                        continue
+                except (EmbeddingError, TypeError, ValueError, OverflowError, UnicodeError):
+                    # Legacy records are evidence, not a startup precondition. A row
+                    # that cannot be verified remains legacy while valid rows migrate.
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO long_term_memory_embedding_artifacts (
+                        memory_id, user_id, embedding_signature_json,
+                        embedding_signature_fingerprint, embedding_purpose,
+                        embedding_content_hash, embedding_vector_format, vector_dim,
+                        embedding, embedding_vector_sha256, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        row["memory_id"],
+                        row["user_id"],
+                        artifact.signature_json,
+                        artifact.signature_fingerprint,
+                        artifact.purpose,
+                        artifact.content_hash,
+                        artifact.vector_format,
+                        artifact.vector_dim,
+                        artifact.vector_bytes,
+                        artifact.vector_sha256,
+                        utc_now(),
+                    ),
+                )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (MEMORY_EMBEDDING_ARTIFACT_MIGRATION_VERSION, utc_now()),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _migrate_memory_scope_provenance(self, conn: sqlite3.Connection) -> None:
         applied = conn.execute(
@@ -1112,6 +1307,39 @@ class SQLiteStore:
     ) -> list[str | None]:
         return [character_id, character_id, session_id]
 
+    def _memory_artifact_eligibility_predicate(
+        self,
+        eligibility: MemoryArtifactEligibility,
+        *,
+        alias: str,
+    ) -> tuple[str, list[Any]]:
+        prefix = f"{alias}."
+        clauses = [
+            f"{prefix}user_id = ?",
+            f"{prefix}status = 'active'",
+            f"{prefix}is_active = 1",
+            self._memory_scope_filter(alias=alias),
+        ]
+        params: list[Any] = [
+            eligibility.user_id,
+            *self._memory_scope_params(
+                character_id=eligibility.character_id,
+                session_id=eligibility.session_id,
+            ),
+        ]
+        if eligibility.namespaces:
+            placeholders = ", ".join("?" for _ in eligibility.namespaces)
+            clauses.append(f"{prefix}namespace IN ({placeholders})")
+            params.extend(eligibility.namespaces)
+        if eligibility.memory_types:
+            placeholders = ", ".join("?" for _ in eligibility.memory_types)
+            clauses.append(f"{prefix}memory_type IN ({placeholders})")
+            params.extend(eligibility.memory_types)
+        if eligibility.min_confidence is not None:
+            clauses.append(f"{prefix}confidence >= ?")
+            params.append(eligibility.min_confidence)
+        return " AND ".join(clauses), params
+
     def _validate_memory_scope(
         self,
         *,
@@ -1202,6 +1430,97 @@ class SQLiteStore:
                 ),
             )
         return memory_id
+
+    def create_or_get_exact_active_memory(
+        self,
+        *,
+        user_id: str,
+        scope: str,
+        scope_character_id: str | None,
+        scope_session_id: str | None,
+        namespace: str,
+        memory_type: str,
+        content: str,
+        importance: int,
+        confidence: float,
+        source: str,
+        source_message_id: str | None,
+        source_session_id: str | None,
+        source_job_id: str | None,
+        source_message_ids: list[str] | None = None,
+        related_memory_ids: list[str] | None = None,
+        expiry: str | None = None,
+    ) -> ExactActiveMemoryResult:
+        self._validate_memory_scope(
+            scope=scope,
+            scope_character_id=scope_character_id,
+            scope_session_id=scope_session_id,
+        )
+        memory_id = new_id("memory")
+        identity_params = (
+            user_id,
+            scope,
+            scope_character_id,
+            scope_session_id,
+            content,
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM long_term_memories
+                WHERE user_id = ?
+                  AND status = 'active'
+                  AND is_active = 1
+                  AND scope = ?
+                  AND COALESCE(scope_character_id, '') = COALESCE(?, '')
+                  AND COALESCE(scope_session_id, '') = COALESCE(?, '')
+                  AND content = ?
+                LIMIT 1
+                """,
+                identity_params,
+            ).fetchone()
+            if existing is not None:
+                return ExactActiveMemoryResult(memory_id=existing["id"], created=False)
+            conn.execute(
+                """
+                INSERT INTO long_term_memories
+                (
+                    id, user_id, scope, scope_character_id, scope_session_id,
+                    namespace, memory_type, content, importance, confidence, source,
+                    source_message_id, source_session_id, source_job_id,
+                    source_message_ids_json, related_memory_ids, version, status,
+                    last_used_at, use_count, decay_score, created_at, updated_at,
+                    expiry, is_active
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    1, 'active', NULL, 0, NULL, ?, NULL, ?, 1
+                )
+                """,
+                (
+                    memory_id,
+                    user_id,
+                    scope,
+                    scope_character_id,
+                    scope_session_id,
+                    namespace,
+                    memory_type,
+                    content,
+                    importance,
+                    confidence,
+                    source,
+                    source_message_id,
+                    source_session_id,
+                    source_job_id,
+                    json.dumps(source_message_ids or [], ensure_ascii=False),
+                    json.dumps(related_memory_ids or [], ensure_ascii=True),
+                    utc_now(),
+                    expiry,
+                ),
+            )
+        return ExactActiveMemoryResult(memory_id=memory_id, created=True)
 
     def get_memory(self, *, memory_id: str) -> MemoryRecord | None:
         with self._connect() as conn:
@@ -1324,8 +1643,8 @@ class SQLiteStore:
                   AND status = 'active'
                   AND is_active = 1
                   AND scope = ?
-                  AND scope_character_id IS ?
-                  AND scope_session_id IS ?
+                  AND COALESCE(scope_character_id, '') = COALESCE(?, '')
+                  AND COALESCE(scope_session_id, '') = COALESCE(?, '')
                   AND content = ?
                 LIMIT 1
                 """,
@@ -1578,6 +1897,393 @@ class SQLiteStore:
             )
         results.sort(key=lambda item: item.score, reverse=True)
         return results[:candidate_limit]
+
+    def upsert_memory_embedding_artifact(
+        self,
+        *,
+        memory_id: str,
+        user_id: str,
+        artifact: EmbeddingArtifactWrite,
+    ) -> EmbeddingArtifactUpsertOutcome:
+        prepared = prepare_embedding_artifact(artifact)
+        with self._connect() as conn:
+            # Keep target-content verification and artifact identity resolution in
+            # one SQLite writer transaction so a concurrent content edit cannot
+            # bind a vector to a newer memory value.
+            conn.execute("BEGIN IMMEDIATE")
+            memory = conn.execute(
+                """
+                SELECT content
+                FROM long_term_memories
+                WHERE id = ? AND user_id = ?
+                """,
+                (memory_id, user_id),
+            ).fetchone()
+            if memory is None:
+                raise ValueError("memory_embedding_artifact_target_not_found")
+            if canonical_content_hash(memory["content"]) != prepared.content_hash:
+                raise EmbeddingArtifactValidationError("content_hash_target_mismatch")
+
+            existing = conn.execute(
+                """
+                SELECT user_id, embedding_signature_json, embedding_content_hash,
+                       embedding_vector_sha256
+                FROM long_term_memory_embedding_artifacts
+                WHERE memory_id = ?
+                  AND embedding_signature_fingerprint = ?
+                  AND embedding_purpose = ?
+                """,
+                (
+                    memory_id,
+                    prepared.signature_fingerprint,
+                    prepared.purpose,
+                ),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO long_term_memory_embedding_artifacts (
+                        memory_id, user_id, embedding_signature_json,
+                        embedding_signature_fingerprint, embedding_purpose,
+                        embedding_content_hash, embedding_vector_format, vector_dim,
+                        embedding, embedding_vector_sha256, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        memory_id,
+                        user_id,
+                        prepared.signature_json,
+                        prepared.signature_fingerprint,
+                        prepared.purpose,
+                        prepared.content_hash,
+                        prepared.vector_format,
+                        prepared.vector_dim,
+                        prepared.vector_bytes,
+                        prepared.vector_sha256,
+                        utc_now(),
+                    ),
+                )
+                return EmbeddingArtifactUpsertOutcome(status="created")
+            if existing["embedding_signature_json"] != prepared.signature_json:
+                raise EmbeddingArtifactValidationError("signature_fingerprint_collision")
+            if existing["user_id"] != user_id:
+                raise ValueError("memory_embedding_artifact_owner_mismatch")
+            if existing["embedding_content_hash"] == prepared.content_hash:
+                diagnostics = ()
+                if existing["embedding_vector_sha256"] != prepared.vector_sha256:
+                    diagnostics = diagnostics_from_reasons(["incoming_vector_differs"])
+                return EmbeddingArtifactUpsertOutcome(status="reused", diagnostics=diagnostics)
+            conn.execute(
+                """
+                UPDATE long_term_memory_embedding_artifacts
+                SET embedding_content_hash = ?,
+                    embedding_vector_format = ?,
+                    vector_dim = ?,
+                    embedding = ?,
+                    embedding_vector_sha256 = ?,
+                    updated_at = ?
+                WHERE memory_id = ?
+                  AND embedding_signature_fingerprint = ?
+                  AND embedding_purpose = ?
+                """,
+                (
+                    prepared.content_hash,
+                    prepared.vector_format,
+                    prepared.vector_dim,
+                    prepared.vector_bytes,
+                    prepared.vector_sha256,
+                    utc_now(),
+                    memory_id,
+                    prepared.signature_fingerprint,
+                    prepared.purpose,
+                ),
+            )
+            return EmbeddingArtifactUpsertOutcome(status="replaced")
+
+    def search_memory_embedding_artifacts(
+        self,
+        *,
+        eligibility: MemoryArtifactEligibility,
+        query_signature: EmbeddingModelSignature,
+        query_embedding: np.ndarray,
+        limit: int,
+        candidate_limit: int | None = None,
+    ) -> MemoryEmbeddingSearchOutcome:
+        candidate_limit = candidate_limit or max(limit * 4, limit + 8)
+        query = prepare_embedding_query(
+            signature=query_signature,
+            vector=query_embedding,
+        )
+        memory_filter, memory_filter_params = self._memory_artifact_eligibility_predicate(
+            eligibility,
+            alias="m",
+        )
+        legacy_hash_signature = deterministic_hash_v1_legacy_signature()
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            eligible_memory_count = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM long_term_memories AS m
+                WHERE {memory_filter}
+                """,
+                memory_filter_params,
+            ).fetchone()["count"]
+            rows = conn.execute(
+                f"""
+                SELECT a.memory_id, a.embedding_signature_json,
+                       a.embedding_signature_fingerprint, a.embedding_purpose,
+                       a.embedding_content_hash, a.embedding_vector_format,
+                       a.vector_dim, a.embedding, a.embedding_vector_sha256,
+                       m.content
+                FROM long_term_memory_embedding_artifacts AS a
+                INNER JOIN long_term_memories AS m ON m.id = a.memory_id
+                WHERE a.user_id = m.user_id
+                  AND a.embedding_signature_fingerprint = ?
+                  AND a.embedding_purpose = 'document'
+                  AND {memory_filter}
+                """,
+                (query.signature_fingerprint, *memory_filter_params),
+            ).fetchall()
+            artifact_count = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM long_term_memory_embedding_artifacts AS a
+                INNER JOIN long_term_memories AS m ON m.id = a.memory_id
+                WHERE a.user_id = m.user_id
+                  AND a.embedding_purpose = 'document'
+                  AND {memory_filter}
+                """,
+                memory_filter_params,
+            ).fetchone()["count"]
+            incompatible_signature_count = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM long_term_memory_embedding_artifacts AS a
+                INNER JOIN long_term_memories AS m ON m.id = a.memory_id
+                WHERE a.user_id = m.user_id
+                  AND a.embedding_purpose = 'document'
+                  AND a.embedding_signature_fingerprint != ?
+                  AND {memory_filter}
+                """,
+                (query.signature_fingerprint, *memory_filter_params),
+            ).fetchone()["count"]
+            legacy_rows = conn.execute(
+                f"""
+                SELECT e.memory_id, e.embedding_model, e.vector_dim,
+                       e.embedding AS legacy_embedding, m.content,
+                       a.embedding_signature_json AS artifact_signature_json,
+                       a.embedding_signature_fingerprint AS artifact_signature_fingerprint,
+                       a.embedding_purpose AS artifact_purpose,
+                       a.embedding_content_hash AS artifact_content_hash,
+                       a.embedding_vector_format AS artifact_vector_format,
+                       a.vector_dim AS artifact_vector_dim,
+                       a.embedding AS artifact_embedding,
+                       a.embedding_vector_sha256 AS artifact_vector_sha256
+                FROM long_term_memory_embeddings AS e
+                INNER JOIN long_term_memories AS m ON m.id = e.memory_id
+                LEFT JOIN long_term_memory_embedding_artifacts AS a
+                    ON a.memory_id = e.memory_id
+                   AND a.user_id = e.user_id
+                   AND a.embedding_signature_fingerprint = ?
+                   AND a.embedding_purpose = 'document'
+                WHERE e.user_id = m.user_id
+                  AND {memory_filter}
+                """,
+                (
+                    legacy_hash_signature.fingerprint(),
+                    *memory_filter_params,
+                ),
+            ).fetchall()
+
+        reasons: list[str] = ["signature_mismatch"] * incompatible_signature_count
+        results: list[MemoryVectorSearchResult] = []
+        compatible_count = 0
+        for row in rows:
+            if row["embedding_signature_json"] != query.signature_json:
+                reasons.append("signature_mismatch")
+                continue
+            try:
+                _signature, vector = validate_stored_embedding_artifact(
+                    signature_json=row["embedding_signature_json"],
+                    signature_fingerprint=row["embedding_signature_fingerprint"],
+                    content_hash=row["embedding_content_hash"],
+                    purpose=row["embedding_purpose"],
+                    vector_format=row["embedding_vector_format"],
+                    vector_dim=row["vector_dim"],
+                    vector_bytes=row["embedding"],
+                    vector_sha256=row["embedding_vector_sha256"],
+                )
+            except EmbeddingArtifactValidationError as exc:
+                reasons.append(
+                    "signature_corrupt"
+                    if exc.reason.startswith("signature_")
+                    else "vector_corrupt"
+                )
+                continue
+            if canonical_content_hash(row["content"]) != row["embedding_content_hash"]:
+                reasons.append("content_hash_stale")
+                continue
+            compatible_count += 1
+            results.append(
+                MemoryVectorSearchResult(
+                    memory_id=row["memory_id"],
+                    score=float(np.dot(query.vector, vector)),
+                )
+            )
+        reasons.extend(
+            "legacy_unverified"
+            for row in legacy_rows
+            if not is_promoted_deterministic_hash_legacy(
+                embedding_model=row["embedding_model"],
+                vector_dim=row["vector_dim"],
+                legacy_vector_bytes=row["legacy_embedding"],
+                target_content=row["content"],
+                artifact_signature_json=row["artifact_signature_json"],
+                artifact_signature_fingerprint=row["artifact_signature_fingerprint"],
+                artifact_purpose=row["artifact_purpose"],
+                artifact_content_hash=row["artifact_content_hash"],
+                artifact_vector_format=row["artifact_vector_format"],
+                artifact_vector_dim=row["artifact_vector_dim"],
+                artifact_vector_bytes=row["artifact_embedding"],
+                artifact_vector_sha256=row["artifact_vector_sha256"],
+            )
+        )
+        results.sort(key=lambda item: item.score, reverse=True)
+        return MemoryEmbeddingSearchOutcome(
+            hits=results[:candidate_limit],
+            diagnostics=EmbeddingArtifactDiagnostics(
+                scanned_count=artifact_count + len(legacy_rows),
+                compatible_count=compatible_count,
+                issues=diagnostics_from_reasons(reasons),
+            ),
+            eligible_memory_count=eligible_memory_count,
+        )
+
+    def list_memory_embedding_artifact_gaps(
+        self,
+        *,
+        query_signature: EmbeddingModelSignature,
+        user_id: str | None = None,
+        cursor: MemoryEmbeddingArtifactGapCursor | None = None,
+        limit: int = 50,
+    ) -> MemoryEmbeddingArtifactGapPage:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _MAX_MEMORY_ARTIFACT_GAP_LIMIT
+        ):
+            raise ValueError("memory_artifact_gap_limit_invalid")
+        scan_limit = min(limit * 4, _MAX_MEMORY_ARTIFACT_GAP_SCAN_LIMIT)
+        signature_json = query_signature.canonical()
+        signature_fingerprint = query_signature.fingerprint()
+        clauses = ["m.status = 'active'", "m.is_active = 1"]
+        params: list[Any] = [signature_fingerprint]
+        if user_id is not None:
+            clauses.append("m.user_id = ?")
+            params.append(user_id)
+        if cursor is not None:
+            clauses.append("(m.created_at > ? OR (m.created_at = ? AND m.id > ?))")
+            params.extend((cursor.created_at, cursor.created_at, cursor.memory_id))
+        params.append(scan_limit + 1)
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                f"""
+                SELECT
+                    m.id AS memory_id,
+                    m.user_id,
+                    m.content,
+                    m.created_at,
+                    a.embedding_signature_json AS artifact_signature_json,
+                    a.embedding_signature_fingerprint AS artifact_signature_fingerprint,
+                    a.embedding_purpose AS artifact_purpose,
+                    a.embedding_content_hash AS artifact_content_hash,
+                    a.embedding_vector_format AS artifact_vector_format,
+                    a.vector_dim AS artifact_vector_dim,
+                    a.embedding AS artifact_embedding,
+                    a.embedding_vector_sha256 AS artifact_vector_sha256,
+                    EXISTS(
+                        SELECT 1
+                        FROM long_term_memory_embedding_artifacts AS any_artifact
+                        WHERE any_artifact.memory_id = m.id
+                          AND any_artifact.user_id = m.user_id
+                          AND any_artifact.embedding_purpose = 'document'
+                    ) AS has_any_canonical_artifact,
+                    EXISTS(
+                        SELECT 1
+                        FROM long_term_memory_embeddings AS legacy
+                        WHERE legacy.memory_id = m.id
+                          AND legacy.user_id = m.user_id
+                    ) AS has_legacy_embedding
+                FROM long_term_memories AS m
+                LEFT JOIN long_term_memory_embedding_artifacts AS a
+                    ON a.memory_id = m.id
+                   AND a.user_id = m.user_id
+                   AND a.embedding_signature_fingerprint = ?
+                   AND a.embedding_purpose = 'document'
+                WHERE {' AND '.join(clauses)}
+                ORDER BY m.created_at ASC, m.id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+        candidates = rows[:scan_limit]
+        has_more_candidates = len(rows) > scan_limit
+        gaps: list[MemoryEmbeddingArtifactGap] = []
+        checked = 0
+        next_cursor: MemoryEmbeddingArtifactGapCursor | None = None
+        for row in candidates:
+            checked += 1
+            artifact = None
+            if row["artifact_signature_fingerprint"] is not None:
+                artifact = StoredMemoryEmbeddingArtifact(
+                    signature_json=row["artifact_signature_json"],
+                    signature_fingerprint=row["artifact_signature_fingerprint"],
+                    purpose=row["artifact_purpose"],
+                    content_hash=row["artifact_content_hash"],
+                    vector_format=row["artifact_vector_format"],
+                    vector_dim=row["artifact_vector_dim"],
+                    vector_bytes=row["artifact_embedding"],
+                    vector_sha256=row["artifact_vector_sha256"],
+                )
+            reason = classify_memory_embedding_artifact_gap(
+                target_content=row["content"],
+                expected_signature_json=signature_json,
+                artifact=artifact,
+                has_any_canonical_artifact=bool(row["has_any_canonical_artifact"]),
+                has_legacy_embedding=bool(row["has_legacy_embedding"]),
+            )
+            if reason is not None:
+                gaps.append(
+                    MemoryEmbeddingArtifactGap(
+                        memory_id=row["memory_id"],
+                        user_id=row["user_id"],
+                        content=row["content"],
+                        reason=reason,
+                        created_at=row["created_at"],
+                    )
+                )
+            if len(gaps) == limit:
+                if checked < len(candidates) or has_more_candidates:
+                    next_cursor = MemoryEmbeddingArtifactGapCursor(
+                        created_at=row["created_at"],
+                        memory_id=row["memory_id"],
+                    )
+                break
+        else:
+            if candidates and has_more_candidates:
+                last = candidates[-1]
+                next_cursor = MemoryEmbeddingArtifactGapCursor(
+                    created_at=last["created_at"],
+                    memory_id=last["memory_id"],
+                )
+        return MemoryEmbeddingArtifactGapPage(
+            gaps=gaps,
+            next_cursor=next_cursor,
+            scanned_memory_count=checked,
+        )
 
     def mark_memory_used(self, *, memory_id: str) -> None:
         with self._connect() as conn:

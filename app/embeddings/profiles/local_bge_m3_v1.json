@@ -1,0 +1,23 @@
+{
+  "schema_version": "embedding-space-profile/v1",
+  "release_status": "review",
+  "profile_id": "local_bge_m3_v1",
+  "provider": "local_bge_m3",
+  "model_id": "BAAI/bge-m3",
+  "dimension": 1024,
+  "model_revision": "provider_managed",
+  "pooling": "cls",
+  "normalization": "l2",
+  "query_instruction": "",
+  "document_instruction": "",
+  "preprocessing_version": "aemeath-embedding-pre-v1",
+  "postprocessing_version": "normalized-float32-v1",
+  "canary_set_version": "bge_m3_canary_v1",
+  "canary_artifact": "canaries/bge_m3_canary_v1.json",
+  "canary_artifact_sha256": "sha256:6de0f6d98fc5049c6b914856fe19c0aefc9a53ef93fb5d1855eb123c8636f474",
+  "baseline_artifact": null,
+  "baseline_artifact_sha256": null,
+  "fingerprint_algorithm": "baseline-relative-mask-v1",
+  "expected_fingerprint": null,
+  "qualification_thresholds": null
+}

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
-
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 
 from app.db.models import LongTermMemoryModel
 from app.db.repositories.common import SessionFactory, dump_json, load_json_list
+from app.memory.schemas import ExactActiveMemoryResult
 from app.schemas import MemoryRecord
 from app.utils.ids import new_id, utc_now
 
@@ -85,8 +84,26 @@ class MemoryRepository:
             return
         raise ValueError(f"unsupported memory scope: {scope}")
 
-    def _nullable_eq(self, column, value: Any):
-        return column.is_(None) if value is None else column == value
+    def _exact_active_filter(
+        self,
+        *,
+        user_id: str,
+        scope: str,
+        scope_character_id: str | None,
+        scope_session_id: str | None,
+        content: str,
+    ):
+        return (
+            LongTermMemoryModel.user_id == user_id,
+            LongTermMemoryModel.status == "active",
+            LongTermMemoryModel.is_active == 1,
+            LongTermMemoryModel.scope == scope,
+            func.coalesce(LongTermMemoryModel.scope_character_id, "")
+            == (scope_character_id or ""),
+            func.coalesce(LongTermMemoryModel.scope_session_id, "")
+            == (scope_session_id or ""),
+            LongTermMemoryModel.content == content,
+        )
 
     def create_memory(
         self,
@@ -149,6 +166,87 @@ class MemoryRepository:
             )
             session.commit()
         return memory_id
+
+    def create_or_get_exact_active_memory(
+        self,
+        *,
+        user_id: str,
+        scope: str,
+        scope_character_id: str | None,
+        scope_session_id: str | None,
+        namespace: str,
+        memory_type: str,
+        content: str,
+        importance: int,
+        confidence: float,
+        source: str,
+        source_message_id: str | None,
+        source_session_id: str | None,
+        source_job_id: str | None,
+        source_message_ids: list[str] | None = None,
+        related_memory_ids: list[str] | None = None,
+        expiry: str | None = None,
+    ) -> ExactActiveMemoryResult:
+        self._validate_memory_scope(
+            scope=scope,
+            scope_character_id=scope_character_id,
+            scope_session_id=scope_session_id,
+        )
+        memory_id = new_id("memory")
+        with self._session_factory() as session:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            existing = (
+                session.query(LongTermMemoryModel.id)
+                .filter(
+                    *self._exact_active_filter(
+                        user_id=user_id,
+                        scope=scope,
+                        scope_character_id=scope_character_id,
+                        scope_session_id=scope_session_id,
+                        content=content,
+                    )
+                )
+                .limit(1)
+                .one_or_none()
+            )
+            if existing is not None:
+                session.commit()
+                return ExactActiveMemoryResult(memory_id=existing[0], created=False)
+            session.add(
+                LongTermMemoryModel(
+                    id=memory_id,
+                    user_id=user_id,
+                    scope=scope,
+                    scope_character_id=scope_character_id,
+                    scope_session_id=scope_session_id,
+                    namespace=namespace,
+                    memory_type=memory_type,
+                    content=content,
+                    importance=importance,
+                    confidence=confidence,
+                    source=source,
+                    source_message_id=source_message_id,
+                    source_session_id=source_session_id,
+                    source_job_id=source_job_id,
+                    source_message_ids_json=dump_json(source_message_ids or []),
+                    related_memory_ids=dump_json(
+                        related_memory_ids or [],
+                        ensure_ascii=True,
+                    ),
+                    version=1,
+                    status="active",
+                    last_used_at=None,
+                    use_count=0,
+                    decay_score=None,
+                    created_at=utc_now(),
+                    updated_at=None,
+                    expiry=expiry,
+                    is_active=1,
+                )
+            )
+            session.flush()
+            session.commit()
+        return ExactActiveMemoryResult(memory_id=memory_id, created=True)
 
     def get_memory(self, *, memory_id: str) -> MemoryRecord | None:
         with self._session_factory() as session:
@@ -258,19 +356,13 @@ class MemoryRepository:
             exists = (
                 session.query(LongTermMemoryModel.id)
                 .filter(
-                    LongTermMemoryModel.user_id == user_id,
-                    LongTermMemoryModel.status == "active",
-                    LongTermMemoryModel.is_active == 1,
-                    LongTermMemoryModel.scope == scope,
-                    self._nullable_eq(
-                        LongTermMemoryModel.scope_character_id,
-                        scope_character_id,
-                    ),
-                    self._nullable_eq(
-                        LongTermMemoryModel.scope_session_id,
-                        scope_session_id,
-                    ),
-                    LongTermMemoryModel.content == content,
+                    *self._exact_active_filter(
+                        user_id=user_id,
+                        scope=scope,
+                        scope_character_id=scope_character_id,
+                        scope_session_id=scope_session_id,
+                        content=content,
+                    )
                 )
                 .limit(1)
                 .one_or_none()

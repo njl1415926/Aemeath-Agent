@@ -67,16 +67,19 @@ class MemoryAdminService:
             trigger_type="manual",
         )
         lines = ["[memory extract]"]
-        if not result.created_memory_ids and not result.skipped_contents:
+        if not result.created_memory_ids and not result.existing_memory_ids:
             lines.append("no long-term memories extracted")
             return "\n".join(lines)
         for memory_id in result.created_memory_ids:
             memory = self.store.get_memory(memory_id=memory_id)
             lines.append(f"created {memory_id}")
             lines.append(f"- {memory.content if memory else '(missing memory record)'}")
-        for content in result.skipped_contents:
-            lines.append("skipped duplicate")
-            lines.append(f"- {content}")
+        for memory_id in result.existing_memory_ids:
+            memory = self.store.get_memory(memory_id=memory_id)
+            lines.append(f"existing {memory_id}")
+            lines.append(f"- {memory.content if memory else '(missing memory record)'}")
+        for memory_id in result.embedding_pending_memory_ids:
+            lines.append(f"embedding pending {memory_id}")
         return "\n".join(lines)
 
     def handle_command(

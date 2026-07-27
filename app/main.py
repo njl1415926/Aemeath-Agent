@@ -23,10 +23,10 @@ from app.memory.runtime import build_memory_embedding_provider
 from app.memory.writer import QueuedMemoryWriter
 from app.model.deepseek import DeepSeekClient, FallbackChatModelClient
 from app.model.mock import MockChatModelClient
-from app.observability.app_logger import JsonlAppLogger
-from app.observability.noop import NoopAppLogger, NoopPromptRunLogger, NoopTraceLogger
+from app.observability.noop import NoopPromptRunLogger, NoopTraceLogger
 from app.observability.ports import AppLoggerPort
 from app.observability.prompt_run_logger import JsonlPromptRunLogger
+from app.observability.runtime import create_app_logger
 from app.observability.trace_logger import JsonlTraceLogger
 from app.retrieval.provider import WorldInfoEvidenceProvider
 from app.services.agent_service import AgentService
@@ -35,9 +35,12 @@ from app.state.classifier import StateUpdateClassifier
 
 def build_controller(
     settings: Settings | None = None,
+    *,
+    app_logger: AppLoggerPort | None = None,
 ) -> tuple[DialogueController, MemoryAdminService, Settings, StoreFacade]:
     settings = settings or Settings.from_env()
     settings.validate()
+    app_logger = app_logger or build_app_logger(settings)
     store = create_store(db_path=settings.db_path, backend=settings.db_backend)
     _bootstrap_accounts(settings=settings, store=store)
     if settings.use_mock_llm:
@@ -60,7 +63,10 @@ def build_controller(
 
     memory_extraction_service = None
     if settings.enable_long_term_memory:
-        memory_embedding_provider = build_memory_embedding_provider(settings)
+        memory_embedding_provider = build_memory_embedding_provider(
+            settings,
+            app_logger=app_logger,
+        )
         extraction_model = (
             MockMemoryExtractionModelClient() if settings.use_mock_llm else chat_model
         )
@@ -68,12 +74,14 @@ def build_controller(
             store=store,
             model_client=extraction_model,
             embedding_provider=memory_embedding_provider,
+            app_logger=app_logger,
         )
         memory_reader = MemoryReader(
             store,
             embedding_provider=memory_embedding_provider,
             recall_top_k=settings.memory_recall_top_k,
             recall_threshold=settings.memory_recall_threshold,
+            app_logger=app_logger,
         )
         memory_writer = QueuedMemoryWriter(
             store,
@@ -143,15 +151,20 @@ def _bootstrap_accounts(*, settings: Settings, store: StoreFacade) -> None:
 
 
 def build_app_logger(settings: Settings) -> AppLoggerPort:
-    if settings.enable_app_log:
-        return JsonlAppLogger(root_dir=settings.app_log_root)
-    return NoopAppLogger()
+    return create_app_logger(
+        enabled=settings.enable_app_log,
+        root_dir=settings.app_log_root,
+    )
 
 
 def build_agent_service(
     settings: Settings | None = None,
 ) -> tuple[AgentService, MemoryAdminService, Settings, StoreFacade]:
-    controller, memory_admin, resolved_settings, store = build_controller(settings=settings)
-    app_logger = build_app_logger(resolved_settings)
+    resolved_input = settings or Settings.from_env()
+    app_logger = build_app_logger(resolved_input)
+    controller, memory_admin, resolved_settings, store = build_controller(
+        settings=resolved_input,
+        app_logger=app_logger,
+    )
     service = AgentService(controller=controller, app_logger=app_logger)
     return service, memory_admin, resolved_settings, store

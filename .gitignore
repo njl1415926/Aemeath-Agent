@@ -211,6 +211,7 @@ tempCodeRunnerFile.py
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/rag_indexes/
 source_doc/
 Aemeath_roleplay_skill/wuthering_waves_gamedata/
 

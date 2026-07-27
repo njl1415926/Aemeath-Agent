@@ -85,6 +85,90 @@ When Alembic is introduced later:
 The SQLAlchemy v0.1 backend preserves current public DTOs. Datetime fields remain ISO strings, JSON
 fields remain text columns with explicit serialization, and embeddings remain `float32` BLOBs.
 
+## Embedding Artifact Persistence
+
+Embedding spaces are persisted as independent artifacts rather than as a single vector attached to
+one Memory or RAG chunk. A target may therefore retain Hash, local BGE, and SiliconFlow artifacts
+side by side while a later worker rebuilds or rolls back one space.
+
+Every canonical artifact records:
+
+- `embedding_signature_json`: exact `EmbeddingModelSignature.canonical()` value;
+- `embedding_signature_fingerprint`: SHA-256 of that canonical value;
+- `embedding_purpose`: currently `document` for durable material;
+- `embedding_content_hash`: SHA-256 of the canonical text that was actually embedded;
+- `embedding_vector_format`: `f32le-v1`;
+- `embedding_vector_sha256`: SHA-256 of the persisted canonical vector bytes.
+
+The new artifact APIs require the caller to create canonical text, content hash, and embedding first.
+Within the same write transaction, the store recomputes the current target content hash and rejects a
+write if it differs. This prevents an embedding created for older text from being attached after the
+Memory or chunk changes.
+
+For an existing `(target_id, signature fingerprint, purpose)` artifact:
+
+- same content hash: preserve the stored vector and return `reused`; a different incoming vector
+  returns the `incoming_vector_differs` diagnostic without overwriting it;
+- different content hash: replace that artifact only;
+- different signature: add a separate artifact.
+
+Canonical searches prefilter by query signature fingerprint and purpose in SQL, then verify the complete
+canonical JSON before scoring. They only score exact-space, valid, non-stale artifacts. The new parallel
+search APIs return aggregate compatibility diagnostics after the normal user/scope or namespace filter,
+and never expose target IDs. The older list-returning Memory and RAG methods remain legacy compatibility
+APIs for one release.
+
+### Memory Canonical Contracts
+
+Active Memory identity is `user_id + scope + scope_character_id + scope_session_id + content`. Both
+backends enforce it with the same partial unique expression index, restricted to
+`status = 'active' AND is_active = 1`. `create_or_get_exact_active_memory(...)` first enters a SQLite
+writer transaction, selects that exact active identity, and either reuses the original row unchanged or
+performs an ordinary insert. It never uses `INSERT OR IGNORE`. Archived or disabled rows are deliberately
+outside the invariant and therefore allow a replacement active Memory.
+
+Raw SQLite checks legacy data for duplicate active identities before creating the index. A duplicate
+raises content-safe `STORAGE_MIGRATION_REQUIRED` without writing the migration marker or altering Memory
+rows. SQLAlchemy verifies the index on every existing experimental database using `PRAGMA index_list` and
+`PRAGMA index_xinfo` plus the `sqlite_master` DDL, including its uniqueness, exact five-key expression
+layout, and exact partial predicate. An expanded or narrowed `WHERE` expression is invalid even when it
+contains the expected terms. The DDL normalizer is quote-aware: it folds only structural SQL outside
+single-quoted literals, preserving literal whitespace, case, and escaped quotes. It fails fast rather
+than relying on incomplete reflection or attempting repair.
+
+Canonical Memory search accepts a `MemoryArtifactEligibility` value. `eligible_memory_count`, artifact
+candidates, and aggregate diagnostics share the identical owner, scope, active/status, namespace,
+memory-type, and minimum-confidence predicates in one transaction snapshot. `eligible_memory_count` is
+coverage, not a BLOB scan count.
+
+`list_memory_embedding_artifact_gaps(...)` is a persistence-only, internal Worker API. It scans at most
+`min(limit * 4, 400)` active Memory rows in stable `(created_at, id)` order and uses one bounded query per
+window to fetch the exact artifact, the presence of another canonical space, and legacy evidence. Reasons
+are `missing`, `content_stale`, `vector_corrupt`, `signature_corrupt`, and `legacy_only`. A valid artifact
+in another signature space only makes the requested exact space `missing`; it is never damaged or called
+corrupt. When a window contains more gaps than the requested page size, the cursor is the last Memory
+actually checked, so a subsequent page cannot skip unreturned gaps. An empty gap page may still return a
+cursor after scanning healthy rows. The API has no repair, retry, fallback, or rebuild policy and must not
+be exposed through Service, FastAPI, or MCP.
+
+`long_term_memory_embeddings` and RAG's `legacy_chunk_embedding_artifacts` retain legacy evidence. Raw
+SQLite can promote only a 384-dimensional `deterministic_hash_v1` row whose canonical document text is
+re-embedded and byte-for-byte verified. A bad legacy row is left unverifiable without blocking startup;
+only database or program-level migration failures roll back. Local BGE, SiliconFlow, unknown models,
+malformed blobs, and non-matching Hash rows remain legacy and cannot enter canonical search. Once the
+RAG copy and promotion marker are committed, the temporary `chunks_legacy_embedding_v0` table is dropped
+without an automatic `VACUUM`.
+
+Legacy diagnostics suppress only the individual verified `deterministic_hash_v1` legacy row that exactly
+matches its promoted canonical artifact. A BGE, unknown, stale, or corrupt legacy row remains
+`legacy_unverified` even when the same Memory or RAG chunk also has a usable canonical artifact in another
+space. This compatibility classification is independent of the active query profile.
+
+The SQLAlchemy backend deliberately does not migrate pre-artifact experimental databases. It raises
+`STORAGE_MIGRATION_REQUIRED`; a developer must explicitly back up, delete, and recreate the database.
+Runtime code never deletes a database automatically. RAG index manifest state, repair scheduling,
+fallback, and rebuild policy remain owned by later Memory and RAG work.
+
 Known SQLite/PostgreSQL compatibility areas for future work:
 
 - JSON text columns should become JSON/JSONB only after a reviewed migration.
@@ -114,8 +198,26 @@ Current contract coverage includes:
 - memory owner-only archive/disable;
 - memory extraction job enqueue idempotency, claim, complete, and fail;
 - embedding upsert/search/retrieval.
+- exact-active Memory create-or-get concurrency, scope identity isolation, and first-write preservation;
+- eligible-Memory coverage counts under combined owner, scope, namespace, type, and confidence filters;
+- canonical artifact-gap classification and bounded keyset pagination;
+- raw duplicate-identity migration fail-fast with no row or marker mutation;
+- SQLAlchemy missing/wrong expression-index fail-fast.
+- expanded or narrowed active-identity predicates rejected by both backends;
+- altered string literals in the predicate or `COALESCE` expression rejected by both backends;
+- archive followed by restart and same-identity recreation.
 
 Legacy raw SQLite migration/backfill tests remain specific to `SQLiteStore`.
+
+Artifact contract coverage additionally includes:
+
+- multiple exact signatures for one Memory or RAG chunk;
+- canonical content hash binding and replacement only after target content changes;
+- non-destructive handling of different valid incoming vectors;
+- vector SHA-256 corruption detection;
+- diagnostics filtered by Memory ownership/scope or RAG namespace;
+- verified Hash promotion and BGE/unknown legacy rejection;
+- SQLAlchemy experimental-schema fail-fast behavior.
 
 ## Rollback
 

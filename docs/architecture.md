@@ -6,7 +6,7 @@ v0.3 keeps `DialogueController` as an orchestration layer and promotes Session a
 long-term Memory to explicit runtime systems:
 
 ```text
-CLI / future API
+CLI / FastAPI
   -> SessionStorePort
   -> DialogueController
        -> CharacterProviderPort
@@ -23,6 +23,43 @@ visibility through `user_global`, `character`, and `session` scopes. Extraction 
 embeddings are implementation details behind Memory ports; RAG remains behind
 `EvidenceProviderPort`. This keeps later API, tool, MCP, or LangGraph adapters from becoming
 business-policy owners.
+
+2026-07 current-state note: normal CLI turns and FastAPI chat now enter through `AgentService`
+before reaching `DialogueController`. FastAPI also adds auth, request-id, API error mapping, and
+app-log behavior at the HTTP adapter boundary.
+
+## 2026-07-26 Embedding Foundation And Artifact Persistence
+
+Embedding is now a shared infrastructure capability rather than a Retrieval-owned implementation:
+
+- `app/embeddings/` owns the batch-first `EmbeddingProviderPort`, versioned
+  `EmbeddingSpaceProfile`, exact `EmbeddingModelSignature`, provider factory, qualification probes,
+  typed errors, and embedding observability.
+- `deterministic_hash_v1` is the only approved profile and is intended for deterministic tests and
+  explicit development use. SiliconFlow BGE-M3 and local BGE-M3 profiles remain behind the
+  qualification and approval gate.
+- Memory and RAG persistence can store multiple canonical embedding artifacts for one target. The
+  artifact identity is `target id + signature fingerprint + purpose`; full canonical signature,
+  content hash, vector format, dimension, vector digest, and current target content are validated
+  before scoring.
+- Raw SQLite and SQLAlchemy Memory stores expose parallel canonical artifact APIs while retaining
+  legacy methods for one compatibility release. RAG follows the same split through
+  `SqliteVectorStore`.
+- Legacy Hash rows are promoted only after byte-for-byte verification. BGE, unknown, stale, corrupt,
+  or mismatched legacy rows remain isolated and are reported as `legacy_unverified`.
+
+T-0133 now uses this foundation end to end in the enabled Memory workflow. `MemoryReader` obtains a
+provider-neutral resolved query embedding and searches only the exact canonical signature. It uses
+the eligible Memory count to detect incomplete coverage, keeps vector hits first, and fills remaining
+slots through scope-consistent keyword recall. Query failures and no-hit cases degrade to keyword
+recall; explicit Chinese recall also retains the active-memory fallback.
+
+`MemoryExtractionService` commits Memory facts through atomic exact-active create-or-get before one
+batch of `document` embeddings. Artifact failure leaves facts committed and derives pending work from
+exact-signature gaps. The single Memory Worker repairs bounded gap pages on an independent interval
+with failure backoff. Other signatures remain valid coexisting spaces. The active dialogue RAG
+provider remains `WorldInfoEvidenceProvider`, so this Memory integration does not change the RAG
+runtime path.
 
 ## 2026-06-08 Manager Update: Session Contract v0.1
 
@@ -114,7 +151,7 @@ v0.3 已跑通一个最小但可扩展的角色对话闭环：
 ## 高层数据流
 
 ```text
-CLI / future API / future Web
+CLI / FastAPI / future Web
   |
   v
 AgentService
@@ -152,7 +189,7 @@ AgentTurnOutput
 
 职责：
 
-- 在 CLI / future API / future Web 和 `DialogueController` 之间提供稳定应用边界。
+- 在 CLI / FastAPI / future Web 和 `DialogueController` 之间提供稳定应用边界。
 - 将 `UserContext` / `ChatRequest` 转换为内部 `AgentTurnInput`。
 - 将 `AgentTurnOutput` 转换为 adapter 友好的 `ChatResponse`。
 - 成功时返回 DTO；失败时继续抛出原异常，由 adapter 调用 `map_exception(...)` 映射。
@@ -177,13 +214,13 @@ AgentTurnOutput
 - 提供本地 `accounts` 模型和默认账号 bootstrap。
 - 可选解析 dev/static bearer token，并输出 `UserContext`。
 - 提供最小 owner-only permission helper。
-- 保持账号状态、token、cookie、authorization 等 Auth 细节在 CLI / future API adapter
+- 保持账号状态、token、cookie、authorization 等 Auth 细节在 CLI / FastAPI adapter
   边界，不进入 `DialogueController`。
 
 当前边界：
 
 ```text
-CLI / future API adapter
+CLI / FastAPI adapter
   -> AuthService / LocalDefaultAccountResolver
   -> UserContext
   -> AgentService
@@ -263,6 +300,10 @@ Current active provider: `WorldInfoEvidenceProvider`.
 `EmptyEvidenceProvider` remains available as a no-evidence implementation for tests or explicitly
 disabled RAG runs, but it is no longer the default provider in `app/main.py`.
 
+2026-07 current-state note: the main runtime wires `WorldInfoEvidenceProvider` through
+`EvidenceProviderPort`. Older references to `EmptyEvidenceProvider` as the default describe the
+pre-World-Info runtime and should not guide new worker implementation.
+
 位置：
 
 - `app/retrieval/ports.py`
@@ -306,6 +347,10 @@ disabled RAG runs, but it is no longer the default provider in `app/main.py`.
 - `DeepSeekClient`
 - `FallbackChatModelClient`
 
+2026-07 current-state note: CLI runtime keeps graceful model fallback enabled by default.
+FastAPI runtime disables model fallback by default through
+`AEMEATH_API_ENABLE_MODEL_FALLBACK=false`, so provider failures surface as stable API errors.
+
 ### Error Handling Layer
 
 Position:
@@ -315,7 +360,7 @@ Position:
 
 Responsibilities:
 
-- Provide a stable error contract shared by CLI, future API adapters, trace records, and prompt
+- Provide a stable error contract shared by CLI, FastAPI adapters, trace records, and prompt
   run logs.
 - Map runtime exceptions into `ErrorInfo` with stable `ErrorCode`, public message, retryability,
   details, and internal message fields.
@@ -331,7 +376,7 @@ Current implementation:
   validation, and internal errors.
 - `AemeathError` can carry a stable code and public message from business modules.
 - `map_exception(exc)` converts known exceptions into `ErrorInfo`.
-- `http_status_for_error(error_info)` is ready for future API response mapping.
+- `http_status_for_error(error_info)` is used by FastAPI and remains available for future HTTP adapters.
 - `redact_sensitive(...)` redacts common secret fields, including `api_key`, `apikey`, `api-key`,
   `x-api-key`, `x_api_key`, `authorization`, `cookie`, `password`, `secret`, and `token`, while
   avoiding broad false positives such as ordinary `ordinary-key` fields.
@@ -340,7 +385,7 @@ Boundary:
 
 - `DialogueController` still only orchestrates. It records structured failure metadata and
   re-raises the original exception.
-- CLI and future API/service adapters decide how to present mapped public errors.
+- CLI and FastAPI/service adapters decide how to present mapped public errors.
 - Future service and FastAPI layers should use `map_exception()` and `ErrorInfo.to_public_dict()`;
   they should not return raw `str(exc)` to users.
 
@@ -409,10 +454,13 @@ v0.3 long-term memory runtime 在显式开启 `AEMEATH_ENABLE_LONG_TERM_MEMORY=t
   `memory_extraction_jobs`，使用 `idempotency_key` 防止重复 job。
 - 独立进程 `python -m app.memory.worker` 领取 pending job，调用
   `MemoryExtractionService` 使用 DeepSeek / mock extraction client 提炼 JSON memories。
-- 提炼出的 memory 写入 `long_term_memories`，embedding 写入
-  `long_term_memory_embeddings`。
-- `MemoryReader` 在每轮对话中主动通过 embedding 检索长期记忆，结果进入
+- 提炼出的 Memory 事实先原子写入 `long_term_memories`，再批量写入 exact-signature
+  `long_term_memory_embedding_artifacts`；artifact 失败不回滚事实，由 repair 补齐。
+- `MemoryReader` 在每轮对话中通过 provider-neutral query source 主动检索 exact-signature
+  canonical artifact，coverage 不完整时使用关键词补位，结果进入
   `ContextBuilder.long_term_memories` 和 prompt run log 的 `memory_ids`。
+- 独立 Worker 按 bounded batch、独立 interval 和失败退避修复当前 signature 的 artifact
+  缺口；其他 signature 合法共存，当前版本不提供 extraction job 自动重试。
 - 长期记忆的作用域与来源分离：
   - `scope + scope_character_id + scope_session_id` 决定召回可见性；
   - `source_session_id + source_job_id + source_message_ids_json` 只记录来源。
@@ -422,8 +470,9 @@ v0.3 long-term memory runtime 在显式开启 `AEMEATH_ENABLE_LONG_TERM_MEMORY=t
 - CLI 支持 `/memory extract [limit]` 同步提炼当前 session 最近消息，支持
   `/memory debug on|off` 显示本轮召回内容。
 
-默认 `AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash`，保证基础安装打开长期记忆不会依赖
-`torch` / `transformers`。真实语义召回可显式设置为 `bge-m3` 并提供本地模型路径。
+运行时通过 `AEMEATH_EMBEDDING_PROFILE` 选择 approved profile，并统一经过 Embedding
+Factory。当前仅 `deterministic_hash_v1` 获批，且必须显式开启 Hash；BGE-M3 和 SiliconFlow
+profile 在批准前会 fail-fast。旧 `AEMEATH_MEMORY_EMBEDDING_PROVIDER` 仅保留一个兼容版本。
 
 当前边界约定：
 
@@ -636,8 +685,8 @@ LangGraph 的定位是可选 runtime 编排层。它可以替换当前手写 `Di
 
 1. `MemoryWriteClassifier`、`StateUpdateClassifier` 和部分模块内部 policy 当前包含规则式中文关键词，且部分源码文本在 Windows 控制台显示为乱码。后续应统一检查源文件编码并增加行为测试。
 2. `ContextBuilder` 已产出 `PromptContext`，但 token budget、prompt section 裁剪和 prompt snapshot 尚未实现。
-3. `FallbackChatModelClient` 当前只返回温和兜底文本，后续应记录结构化错误。
-4. `CharacterProvider` 仍以 v0.1 YAML 为唯一来源，尚未接入角色文档管理系统。
+3. `FallbackChatModelClient` 的 CLI/API 默认策略已经分离；后续仍可进一步完善降级响应的结构化观测。
+4. `CharacterProvider` 当前默认使用 `app/character/Aemeath.v0.2/` manifest，v0.1 YAML 仅作为兼容 fallback；后续仍需完善多角色与角色文档治理。
 5. Memory update / merge / conflict / decay 仍未真正实现，只保留了决策字段和 backlog。
 ## 2026-06-04 Retrieval Runtime Update
 

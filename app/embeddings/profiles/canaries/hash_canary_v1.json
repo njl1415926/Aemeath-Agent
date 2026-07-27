@@ -1,0 +1,9 @@
+{
+  "schema_version": "embedding-canary-set/v1",
+  "canary_set_version": "hash_canary_v1",
+  "canaries": [
+    {"id": "ascii", "text": "deterministic hash embedding sample"},
+    {"id": "unicode", "text": "固定的哈希向量样例"},
+    {"id": "mixed", "text": "stable 样例 384 canonical"}
+  ]
+}

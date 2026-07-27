@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from app.embeddings.artifacts import EmbeddingArtifactDiagnostics
 from app.schemas import MemoryRecord
 
 MemoryNamespace = Literal[
@@ -78,7 +79,9 @@ class ExtractedMemory:
 @dataclass(frozen=True)
 class MemoryExtractionResult:
     created_memory_ids: list[str]
-    skipped_contents: list[str]
+    existing_memory_ids: list[str]
+    artifact_written_memory_ids: list[str]
+    embedding_pending_memory_ids: list[str]
     extracted_memories: list[ExtractedMemory]
 
 
@@ -86,3 +89,67 @@ class MemoryExtractionResult:
 class MemoryVectorSearchResult:
     memory_id: str
     score: float
+
+
+@dataclass(frozen=True)
+class ExactActiveMemoryResult:
+    memory_id: str
+    created: bool
+
+
+@dataclass(frozen=True)
+class MemoryArtifactEligibility:
+    user_id: str
+    character_id: str | None
+    session_id: str | None
+    namespaces: tuple[str, ...] = ()
+    memory_types: tuple[str, ...] = ()
+    min_confidence: float | None = None
+
+
+MemoryEmbeddingArtifactGapReason = Literal[
+    "missing",
+    "content_stale",
+    "vector_corrupt",
+    "signature_corrupt",
+    "legacy_only",
+]
+
+
+@dataclass(frozen=True)
+class MemoryEmbeddingArtifactGapCursor:
+    created_at: str
+    memory_id: str
+
+
+@dataclass(frozen=True)
+class MemoryEmbeddingArtifactGap:
+    memory_id: str
+    user_id: str
+    content: str
+    reason: MemoryEmbeddingArtifactGapReason
+    created_at: str
+
+
+@dataclass(frozen=True)
+class MemoryEmbeddingArtifactGapPage:
+    gaps: list[MemoryEmbeddingArtifactGap]
+    next_cursor: MemoryEmbeddingArtifactGapCursor | None
+    scanned_memory_count: int
+
+
+@dataclass(frozen=True)
+class MemoryEmbeddingSearchOutcome:
+    hits: list[MemoryVectorSearchResult]
+    diagnostics: EmbeddingArtifactDiagnostics
+    eligible_memory_count: int
+
+
+@dataclass(frozen=True)
+class MemoryEmbeddingRepairResult:
+    scanned_memory_count: int
+    gap_count: int
+    artifact_written_memory_ids: list[str]
+    embedding_pending_memory_ids: list[str]
+    next_cursor: MemoryEmbeddingArtifactGapCursor | None
+    error_code: str | None = None

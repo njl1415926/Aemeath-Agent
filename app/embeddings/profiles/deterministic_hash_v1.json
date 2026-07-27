@@ -1,0 +1,26 @@
+{
+  "schema_version": "embedding-space-profile/v1",
+  "release_status": "approved",
+  "profile_id": "deterministic_hash_v1",
+  "provider": "deterministic_hash",
+  "model_id": "deterministic_hash_v1",
+  "dimension": 384,
+  "model_revision": "sha1-signed-token-bucket-v1",
+  "pooling": "signed_token_bucket",
+  "normalization": "l2",
+  "query_instruction": "",
+  "document_instruction": "",
+  "preprocessing_version": "legacy-token-regex-v1",
+  "postprocessing_version": "normalized-float32-v1",
+  "canary_set_version": "hash_canary_v1",
+  "canary_artifact": "canaries/hash_canary_v1.json",
+  "canary_artifact_sha256": "sha256:f30cab7931f4d6e0fa3102a292bb10b12e26e98085bee6bda3ae434514435fed",
+  "baseline_artifact": "baselines/deterministic_hash_v1_hash_canary_v1.f32le",
+  "baseline_artifact_sha256": "sha256:c22c762b36075fe2bd7144fd00b5fa6bd9ef6819c79473c7fe47166a463c5e8e",
+  "fingerprint_algorithm": "baseline-relative-mask-v1",
+  "expected_fingerprint": "sha256:84e6deb3fbf4221241817a821e9651e863465202ef9eabba8e19ba00a5541c4b",
+  "qualification_thresholds": {
+    "min_cosine_per_vector": 0.999999,
+    "max_abs_coordinate_delta": 0.0
+  }
+}

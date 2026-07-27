@@ -137,13 +137,16 @@ Long-term memory is disabled by default. Enable the v0.3 runtime in `.env`:
 
 ```env
 AEMEATH_ENABLE_LONG_TERM_MEMORY=true
-AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash
+AEMEATH_EMBEDDING_PROFILE=deterministic_hash_v1
+AEMEATH_EMBEDDING_ALLOW_HASH=true
 ```
 
 The deterministic hash provider has no additional model dependency and is
-appropriate for development. `bge-m3` is available as an opt-in local semantic
-embedding provider, but its model and runtime dependencies must be installed
-separately.
+approved only for tests and explicit development. The legacy
+`AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash` setting remains available for one
+compatibility release and resolves through the same approved-profile gate.
+SiliconFlow and local BGE-M3 profiles cannot be selected by the normal runtime
+until their qualification profiles are separately approved.
 
 The CLI can extract recent messages synchronously:
 
@@ -157,6 +160,11 @@ Queued extraction jobs are processed by a separate worker:
 ```bash
 python -m app.memory.worker
 ```
+
+The worker repairs missing or invalid exact-signature Memory artifacts in
+bounded batches. Repair cadence and backoff use
+`AEMEATH_MEMORY_REPAIR_BATCH_SIZE`, `AEMEATH_MEMORY_REPAIR_INTERVAL_SECONDS`,
+and `AEMEATH_MEMORY_REPAIR_MAX_BACKOFF_SECONDS`.
 
 ## Prompt Logs
 
@@ -194,8 +202,28 @@ app/retrieval/data/Aemeath_World_Info.json
 The `source_doc/` directory is treated as local source material and is not part
 of the release branch.
 
-Embedding RAG utilities exist under `app/retrieval/` and `scripts/`, but vector
-RAG is not the active provider in the main runtime yet.
+Managed embedding RAG tooling exists under `app/retrieval/`, but vector RAG is
+not the active provider in the main runtime. Each managed generation has an
+isolated SQLite database, canonical inventory, checkpoint, and ready manifest.
+The active runtime remains `WorldInfoEvidenceProvider`.
+
+Build an explicit development Hash generation:
+
+```bash
+python -m app.retrieval.manage_rag_index build --profile deterministic_hash_v1 --allow-hash
+```
+
+Inspect or query managed generations:
+
+```bash
+python -m app.retrieval.manage_rag_index status
+python -m app.retrieval.manage_rag_index query --profile deterministic_hash_v1 --allow-hash "query"
+```
+
+The managed root defaults to `data/rag_indexes` and can be changed with
+`AEMEATH_RAG_INDEX_ROOT`. Hash requires explicit approval on every build/query;
+local BGE-M3 and SiliconFlow profiles remain unavailable until separately
+approved.
 
 ## Upgrading From v0.2
 
@@ -219,7 +247,7 @@ ruff check .
 Current release validation:
 
 ```text
-95 passed
+380 passed
 All checks passed
 ```
 

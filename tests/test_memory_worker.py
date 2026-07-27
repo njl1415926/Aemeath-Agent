@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.db.sqlite_store import SQLiteStore
+from app.memory.schemas import MemoryExtractionResult
 from app.memory.worker import _process_memory_extraction_job
 
 
@@ -11,6 +12,17 @@ class FailingExtractionService:
         raise ValueError(
             "provider failed token=secret-token api-key=secret-api-key "
             "Authorization: Bearer secret-bearer cookie=secret-cookie"
+        )
+
+
+class PendingArtifactExtractionService:
+    def extract_and_persist(self, **_kwargs):
+        return MemoryExtractionResult(
+            created_memory_ids=["memory_created"],
+            existing_memory_ids=["memory_existing"],
+            artifact_written_memory_ids=["memory_created"],
+            embedding_pending_memory_ids=["memory_existing"],
+            extracted_memories=[],
         )
 
 
@@ -45,3 +57,34 @@ def test_memory_worker_failure_error_is_sanitized(tmp_path: Path, capsys):
     assert "secret-bearer" not in captured
     assert "secret-cookie" not in captured
     assert "token=[redacted]" in failed_job.error
+
+
+def test_memory_worker_completes_fact_job_with_fixed_artifact_result_fields(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "worker_pending.db")
+    session = store.create_session(user_id="user_1", character_id="aemeath")
+    job = store.enqueue_memory_extraction_job(
+        idempotency_key="pending_artifact_job",
+        user_id="user_1",
+        session_id=session.id,
+        character_id="aemeath",
+        trigger_type="hard",
+        source_message_ids=[],
+        input_payload={},
+    ).job
+
+    _process_memory_extraction_job(
+        store=store,
+        extraction_service=PendingArtifactExtractionService(),  # type: ignore[arg-type]
+        job=job,
+    )
+
+    [completed_job] = store.list_memory_extraction_jobs(session_id=session.id)
+    assert completed_job.status == "completed"
+    assert completed_job.result_payload == {
+        "created_memory_ids": ["memory_created"],
+        "existing_memory_ids": ["memory_existing"],
+        "artifact_written_memory_ids": ["memory_created"],
+        "embedding_pending_memory_ids": ["memory_existing"],
+    }

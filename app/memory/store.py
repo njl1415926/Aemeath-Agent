@@ -4,7 +4,14 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from app.embeddings.artifacts import EmbeddingArtifactUpsertOutcome, EmbeddingArtifactWrite
+from app.embeddings.schemas import EmbeddingModelSignature
 from app.memory.schemas import (
+    ExactActiveMemoryResult,
+    MemoryArtifactEligibility,
+    MemoryEmbeddingArtifactGapCursor,
+    MemoryEmbeddingArtifactGapPage,
+    MemoryEmbeddingSearchOutcome,
     MemoryExtractionJobRecord,
     MemoryJobEnqueueResult,
     MemoryVectorSearchResult,
@@ -33,6 +40,28 @@ class MemoryStore(Protocol):
         related_memory_ids: list[str] | None = None,
         expiry: str | None = None,
     ) -> str:
+        ...
+
+    def create_or_get_exact_active_memory(
+        self,
+        *,
+        user_id: str,
+        scope: str,
+        scope_character_id: str | None,
+        scope_session_id: str | None,
+        namespace: str,
+        memory_type: str,
+        content: str,
+        importance: int,
+        confidence: float,
+        source: str,
+        source_message_id: str | None,
+        source_session_id: str | None,
+        source_job_id: str | None,
+        source_message_ids: list[str] | None = None,
+        related_memory_ids: list[str] | None = None,
+        expiry: str | None = None,
+    ) -> ExactActiveMemoryResult:
         ...
 
     def list_active_memories(self, *, user_id: str, limit: int = 50) -> list[MemoryRecord]:
@@ -154,4 +183,34 @@ class MemoryStore(Protocol):
         limit: int,
         candidate_limit: int | None = None,
     ) -> list[MemoryVectorSearchResult]:
+        ...
+
+    def upsert_memory_embedding_artifact(
+        self,
+        *,
+        memory_id: str,
+        user_id: str,
+        artifact: EmbeddingArtifactWrite,
+    ) -> EmbeddingArtifactUpsertOutcome:
+        ...
+
+    def search_memory_embedding_artifacts(
+        self,
+        *,
+        eligibility: MemoryArtifactEligibility,
+        query_signature: EmbeddingModelSignature,
+        query_embedding: np.ndarray,
+        limit: int,
+        candidate_limit: int | None = None,
+    ) -> MemoryEmbeddingSearchOutcome:
+        ...
+
+    def list_memory_embedding_artifact_gaps(
+        self,
+        *,
+        query_signature: EmbeddingModelSignature,
+        user_id: str | None = None,
+        cursor: MemoryEmbeddingArtifactGapCursor | None = None,
+        limit: int = 50,
+    ) -> MemoryEmbeddingArtifactGapPage:
         ...

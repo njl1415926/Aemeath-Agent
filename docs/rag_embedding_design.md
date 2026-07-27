@@ -30,6 +30,99 @@ As of 2026-06-04, the main CLI runtime uses `WorldInfoEvidenceProvider` as the a
 The previous embedding/vector implementation remains available under `app.retrieval` tooling, but
 it is not the active provider wired in `app/main.py`.
 
+## Canonical Managed Generation Runtime
+
+The managed vector runtime was implemented on 2026-07-26, but remains isolated tooling. It does
+not replace the active `WorldInfoEvidenceProvider` and does not change `app/main.py`.
+
+Each index generation owns one SQLite database and immutable sidecar records:
+
+```text
+data/rag_indexes/<index_id>/
+  active.json
+  build.lock
+  generations/g000001-<random>/
+    manifest.json
+    corpus_inventory.jsonl
+    checkpoint.json
+    index.sqlite
+```
+
+`AEMEATH_RAG_INDEX_ROOT` changes the managed root; its default is `data/rag_indexes`. `index_id`
+must match `^[a-z][a-z0-9_-]{0,63}$`. Runtime index files are ignored by Git.
+
+### Inventory Identity
+
+The corpus fingerprint is computed from a sorted canonical inventory. Every inventory entry has
+`chunk_id`, `namespace`, `source_type`, `canonical_content_hash`, and
+`retrieval_metadata_fingerprint`.
+
+The metadata fingerprint uses an explicit retrieval allowlist. Absolute paths, generation times,
+credentials, and other machine-local values are excluded. Managed chunk metadata is rebuilt from
+that allowlist before persistence.
+
+### Lifecycle And Activation
+
+Generation states are `building`, `staging`, `ready`, and `failed`.
+
+- `building`: batch-first document embedding and committed checkpoints are in progress.
+- `staging`: all writes and stale-chunk deletion are complete.
+- `ready`: WAL checkpoint, SQLite integrity check, and exact-signature coverage all passed.
+- `failed`: a safe failure reason was recorded; the previous active ready generation is retained.
+
+An OS-level cross-process file lock protects generation number allocation and activation. The
+active mapping is reread while the lock is held, flushed to a same-directory temporary file,
+`fsync`ed, atomically replaced, and reopened for verification. Windows sharing violations use a
+finite retry sequence.
+
+Ready generations are opened read-only and never initialized or migrated on the query path. A
+query can only use the ready generation mapped to its exact canonical signature fingerprint.
+Mixed vector spaces and implicit provider fallback are prohibited.
+
+`ready` is a validated invariant rather than a trusted manifest label. Registry resolution,
+no-op reuse, orphan-ready reuse, activation, and future rollback activation all call the same
+`validate_ready_generation()` path. It verifies the persisted inventory, read-only SQLite
+integrity, empty WAL state, exact-signature coverage, and absence of artifact diagnostics.
+
+Invalid non-active generation directories are isolated and exposed as safe status diagnostics.
+They do not block valid generations. Generation numbers are allocated from every valid managed
+directory name, including incomplete directories, so an isolated directory number is never reused.
+
+### Rebuild And Recovery
+
+For the same exact signature and unchanged parser/chunker contracts, corpus changes use a
+consistent clone of the previous ready generation. Changed/new chunks are embedded, stale chunks
+are transactionally deleted, and unchanged artifacts are retained. Signature, parser, chunker,
+chunk-id scheme, namespace policy, or index-format changes cause a full rebuild.
+
+Checkpoints advance only after an embedding batch commits. A matching `building` generation is
+resumed after interruption. A normal build exception marks only the new generation failed; the old
+ready generation remains active. Version 1 does not automatically delete old generations.
+
+`write_batch_size` is part of build-plan identity because the checkpoint stores a batch index.
+Changing batch size therefore starts a different generation instead of interpreting an old index
+against a new partition. Staging resume validates inventory existence, ordering, and fingerprint
+before any ready transition.
+
+If active-file reopen verification fails after atomic replacement, the repository restores and
+verifies the exact previous bytes. Failure to restore is surfaced as a distinct safe rollback
+error.
+
+The first managed generation is always rebuilt from authoritative source chunks. Legacy RAG rows
+are diagnostic/compatibility inputs only and are never promoted into a managed generation.
+
+### Canonical Query Adapter
+
+`CanonicalRagRetriever` accepts the provider-neutral `QueryEmbeddingSourcePort`, resolves a
+`ResolvedQueryEmbedding`, and queries `search_embedding_artifacts()` with the exact signature.
+`search_resolved()` is the future replacement point for `TurnSemanticContext` without changing the
+shared `RetrieverPort`.
+
+Internally, `CanonicalRagSearchOutcome` reports hits, generation id, artifact diagnostics, and an
+availability reason. The public `RetrieverPort` adapter still returns `list[RetrievalResult]`.
+Result metadata is constructed from scratch and contains only `generation_id`, `retriever`,
+`raw_score`, `namespace`, `source_type`, `signature_fingerprint`, and `source_id`.
+
 ## Vector RAG Scope
 
 T-0102 first implementation indexes only official Wuthering Waves game data:
@@ -107,21 +200,17 @@ Voice view:
 
 ## Embeddings And Storage
 
-Production/local embedding target:
+The managed builder uses the Embedding Foundation batch-first `EmbeddingProviderPort` with
+`purpose=document`. The query path consumes a provider-neutral `ResolvedQueryEmbedding` with
+`purpose=query` when using `DirectQueryEmbeddingSource`.
 
-- `BAAI/bge-m3`
-- local path: `.cache/huggingface/BAAI/bge-m3`
-- provider: `BgeM3EmbeddingProvider`
+Only approved exact profiles can build or query a managed generation. At the time of this design,
+`deterministic_hash_v1` is the only approved profile and additionally requires explicit
+`--allow-hash`. Local BGE-M3 and SiliconFlow profiles remain under review and cannot enter the
+managed ready path until separately approved. There is no implicit Hash fallback.
 
-Test and smoke-test embedding:
-
-- `DeterministicHashEmbeddingProvider`
-
-Vector storage:
-
-- SQLite file, default `data/aemeath_rag.sqlite`
-- exact cosine/dot search over normalized vectors
-- one table stores chunk content, metadata JSON, and embedding blobs
+The old `data/aemeath_rag.sqlite`, `upsert_chunks()`, and `search()` path remains a one-release
+legacy compatibility shim. It is not a managed generation and is not reused by the new builder.
 
 ## Retrieval Policy
 
@@ -186,7 +275,30 @@ Flow overlap is detected by identical `source_path + state_key` and at least 50%
 This lets the same source produce both lore and voice views while avoiding duplicate prompt
 injection in a single turn.
 
-## Build And Query
+## Managed Build And Query
+
+Build and activate an explicitly allowed development Hash generation:
+
+```bash
+python -m app.retrieval.manage_rag_index build --profile deterministic_hash_v1 --allow-hash
+```
+
+Inspect active and retained generations without loading an embedding model:
+
+```bash
+python -m app.retrieval.manage_rag_index status
+```
+
+Query the exact-signature ready generation:
+
+```bash
+python -m app.retrieval.manage_rag_index query --profile deterministic_hash_v1 --allow-hash "Aemeath lore query"
+```
+
+Use `--index-root` before the subcommand or set `AEMEATH_RAG_INDEX_ROOT` to select another managed
+root. These commands do not enable vector RAG in the dialogue runtime.
+
+## Legacy Build And Query
 
 Build with hash embeddings for smoke tests:
 
