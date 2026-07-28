@@ -20,16 +20,23 @@ class PromptContext:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def render_system_content(*, context: PromptContext) -> str:
+    system_lines: list[str] = []
+    for section in context.sections:
+        if section.title:
+            system_lines.append(section.title)
+        system_lines.extend(section.content_lines)
+        system_lines.append("")
+    return "\n".join(system_lines).strip()
+
+
+def estimate_prompt_chars(*, context: PromptContext) -> int:
+    return len(render_system_content(context=context)) + len(context.user_input)
+
+
 class PromptCompiler:
     def compile_messages(self, *, context: PromptContext) -> list[dict[str, str]]:
-        system_lines: list[str] = []
-        for section in context.sections:
-            if section.title:
-                system_lines.append(section.title)
-            system_lines.extend(section.content_lines)
-            system_lines.append("")
-
         return [
-            {"role": "system", "content": "\n".join(system_lines).strip()},
+            {"role": "system", "content": render_system_content(context=context)},
             {"role": "user", "content": context.user_input},
         ]

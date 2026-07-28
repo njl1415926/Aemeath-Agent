@@ -311,6 +311,20 @@ class DialogueController:
             )
             prompt_context_metadata = prompt_context.metadata
             prompt_sections = self._serialize_prompt_sections(prompt_context)
+            context_budget = prompt_context.metadata.get("context_budget")
+            if context_budget and context_budget.get("budget_enabled"):
+                self._record_trace(
+                    event_type="context_budget_applied",
+                    turn_id=turn_id,
+                    turn_input=turn_input,
+                    payload=context_budget,
+                    level=(
+                        "warning"
+                        if context_budget.get("status") == "protected_floor_exceeded"
+                        else "info"
+                    ),
+                    character_id=active_character_id,
+                )
             self._record_trace(
                 event_type="prompt_context_built",
                 turn_id=turn_id,

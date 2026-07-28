@@ -1,8 +1,8 @@
 # Context Budget And Compression v0.1 Design
 
-Date: 2026-07-09
+Date: 2026-07-28
 
-Scope: design only. No runtime code is implemented in this session.
+Status: manager decisions approved. This document is the implementation contract for v0.1.
 
 ## 1. Summary
 
@@ -98,8 +98,9 @@ estimated_chars =
       + newline/header overhead
 ```
 
-The exact estimator should be implemented once and tested. It does not need to match
-`PromptCompiler` byte-for-byte, but it should be stable and close to the compiled prompt shape.
+The estimator must use the same system-content rendering semantics as `PromptCompiler`. Its result
+is exactly the sum of the final system and user message content lengths; role labels and JSON/API
+envelopes are excluded.
 
 Why not tokenizer in v0.1:
 
@@ -114,7 +115,7 @@ Budget semantics:
 - `max_chars` is a hard target only for trimmable content.
 - Protected sections are never trimmed.
 - If protected sections plus current user input exceed the budget, the compressor must return an
-  over-budget context and record `over_budget_after_protected=true`.
+  over-budget context with `status=protected_floor_exceeded` and `over_budget_chars > 0`.
 - The compressor must never truncate strings mid-line in v0.1.
 
 Recommended default rollout:
@@ -150,14 +151,9 @@ Never trim:
 Rationale: these carry core identity, role behavior, safety boundaries, hidden-prompt resistance,
 forbidden claims, and user intent for the current turn.
 
-### High Priority Sections
-
-Keep in full in v0.1:
-
-- `relationship_state`
-
-Rationale: it is small, stable, and important to roleplay continuity. If this section grows in a
-future version, it can receive its own policy.
+`relationship_state` is also protected. It is small, stable, and important to roleplay
+continuity. Unknown section ids are protected by default so a future safety or identity section
+cannot be silently trimmed before it is classified.
 
 ### Trimmable Sections
 
@@ -187,27 +183,14 @@ Source tracking:
 
 ### Long-Term Memories
 
-Current limitation: `ContextBuilder` receives `list[MemoryRecord]`, not
-`list[MemorySearchResult]`. That means retrieval score is not available at this boundary today.
-
-Recommended v0.1 ranking without a port change:
-
-```text
-importance desc
-confidence desc
-original order asc
-```
-
-If manager wants true retrieval-score trimming, approve a small interface change so
-`DialogueController` can pass `MemorySearchResult` or annotate memory section items with
-`retrieval_score`.
+T-0135 already owns semantic query construction and memory retrieval ranking. The compressor must
+not create a second relevance policy from `MemoryRecord.importance` or `confidence`.
 
 Rules:
 
 - Apply `AEMEATH_CONTEXT_BUDGET_MEMORY_LIMIT` before global trimming.
-- Drop lower-ranked memories first.
-- Preserve kept memory display in original order unless manager explicitly wants rank-sorted
-  display.
+- Keep the first N memories in the exact order returned by `MemoryReader`.
+- Drop from the end so T-0135 retrieval order remains authoritative.
 - Dropped memory ids go into `dropped_source_ids.interaction_memories`.
 
 ### RAG Evidence
@@ -215,10 +198,9 @@ Rules:
 Rules for `canon_evidence` and `voice_evidence`:
 
 - Apply `AEMEATH_CONTEXT_BUDGET_EVIDENCE_LIMIT` independently to each evidence section.
-- Rank by `confidence desc`, then source order.
-- Source order should use existing retrieval order by default, with metadata order fields used
-  only when present.
-- Drop lower-confidence evidence first.
+- Keep the first N results in the exact order returned by the evidence provider.
+- Do not re-rank from `confidence` inside the compressor.
+- `EVIDENCE_LIMIT=4` applies independently to `canon_evidence` and `voice_evidence`.
 - Dropped retrieval ids go into `dropped_source_ids.canon_evidence` or
   `dropped_source_ids.voice_evidence`.
 
@@ -228,7 +210,9 @@ Rules:
 
 - Style examples are trimmable.
 - They should be dropped from the end first, preserving the beginning of the curated example bank.
-- v0.1 should not require a separate style-example config unless manager wants one.
+- v0.1 assigns deterministic `style_example:0001` synthetic budget source ids because the current
+  `CharacterRuntimeContext` contains formatted strings but not the source YAML item ids.
+- v0.1 does not add a separate style-example limit.
 - This does not replace the older Character Style Examples Prompt Budget backlog item. It only
   gives the general context budget layer permission to trim examples when needed.
 
@@ -243,13 +227,9 @@ Do not:
 - rewrite evidence;
 - summarize content.
 
-If a trimmable section loses all content, use a short placeholder such as:
-
-```text
-- (omitted by context budget)
-```
-
-The placeholder should not include dropped content.
+If a trimmable section loses all content, remove the whole section. Do not add an omission
+placeholder. The report records the dropped section id without consuming prompt budget or adding
+new model-facing text.
 
 ## 5. Config Proposal
 
@@ -300,19 +280,9 @@ Recommended `ContextBuilder` changes:
 
 - Constructor accepts `context_compressor: ContextCompressorPort | None = None`.
 - Build the complete pre-budget `PromptContext`.
-- Add deterministic per-line metadata for trimmable sections, for example:
-
-```text
-section.metadata["budget_items"] = [
-  {
-    "line_index": 0,
-    "source_id": "memory_1",
-    "importance": 9,
-    "confidence": 0.9,
-    "original_index": 0
-  }
-]
-```
+- Keep each trimmable section's `content_lines` and `source_ids` positionally aligned.
+- Use existing recent-message, memory, and evidence ids. Give style examples deterministic
+  synthetic ids without storing their text in metadata.
 
 - Call `self.context_compressor.compress(context=prompt_context)`.
 - Return the compressed context.
@@ -322,6 +292,8 @@ Recommended compressor behavior:
 - Return a new `PromptContext`.
 - Return new `PromptSection` objects for any changed section.
 - Do not mutate existing section lists in place.
+- Apply per-section cardinality limits before the global character limit.
+- Preserve upstream Memory/Evidence order; do not call embedding or re-rank.
 - Keep all dropped content out of metadata. Store ids, counts, estimates, and reasons only.
 
 Recommended controller change:
@@ -337,7 +309,7 @@ Future compatibility:
   disabled for v0.1.
 - A future LangGraph runtime can make compression its own node without changing the prompt data
   contract.
-- A future tokenizer estimator can replace `char_count_v0_1` behind policy without changing
+- A future tokenizer estimator can replace `compiled_message_chars_v1` behind policy without changing
   section trim rules.
 
 ## 7. Metadata And Observability
@@ -353,14 +325,21 @@ Recommended `PromptContext.metadata` shape:
   },
   "memory_ids": ["memory_1"],
   "context_budget": {
+    "schema_version": "context-budget-report/v1",
+    "policy_version": "context-budget-policy/v1",
     "budget_enabled": true,
     "budget_limit": 24000,
     "budget_unit": "chars",
-    "estimator": "char_count_v0_1",
+    "estimator": "compiled_message_chars_v1",
+    "status": "trimmed",
     "estimated_before": 31852,
+    "estimated_after_limits": 27410,
     "estimated_after": 23876,
     "applied": true,
-    "over_budget_after_protected": false,
+    "over_budget_chars": 0,
+    "kept_section_ids": ["base_instructions", "canon_evidence"],
+    "trimmed_section_ids": ["canon_evidence"],
+    "dropped_section_ids": ["style_examples"],
     "trimmed_sections": [
       {
         "section_id": "style_examples",
@@ -370,6 +349,9 @@ Recommended `PromptContext.metadata` shape:
       }
     ],
     "dropped_line_count": 19,
+    "kept_source_ids": {
+      "canon_evidence": ["world_info:86"]
+    },
     "dropped_source_ids": {
       "style_examples": ["style_example:6", "style_example:7"],
       "interaction_memories": ["memory_3"],
@@ -378,7 +360,7 @@ Recommended `PromptContext.metadata` shape:
     "limits": {
       "recent_message_limit": 8,
       "memory_limit": 4,
-      "evidence_limit": 4
+      "evidence_limit_per_section": 4
     }
   }
 }
@@ -388,10 +370,9 @@ Notes:
 
 - Keep metadata namespaced under `context_budget`.
 - Do not store dropped content.
-- Keep current `memory_ids` and `evidence_ids` as the ids remaining in the final prompt, or add
-  explicit `kept_*` fields if manager wants both pre-budget and post-budget id lists.
-- If manager wants backward compatibility for `memory_ids` as "retrieved ids", add separate
-  `context_budget.kept_source_ids` and leave old fields unchanged. This needs a decision.
+- Keep current top-level `memory_ids` and `evidence_ids` as pre-compression retrieval facts.
+- Record final prompt membership in `context_budget.kept_source_ids` and
+  `context_budget.dropped_source_ids`.
 
 Trace event recommendation:
 
@@ -403,9 +384,14 @@ payload:
   estimated_before
   estimated_after
   applied
-  over_budget_after_protected
+  status
+  over_budget_chars
+  kept_section_ids
+  trimmed_section_ids
+  dropped_section_ids
   trimmed_sections
   dropped_line_count
+  kept_source_ids
   dropped_source_ids
 ```
 
@@ -436,16 +422,15 @@ Recommended focused tests:
    - Set recent limit to 3.
    - Assert the last 3 remain and the first 7 ids are in dropped metadata.
 
-3. Memory trimming prefers higher importance.
-   - Build memories with different importance and confidence.
+3. Memory trimming preserves the upstream T-0135 result order.
+   - Build memories in an explicit relevance order.
    - Set memory limit to 2.
-   - Assert low-ranked memory ids are dropped.
-   - Add a tie case proving original order is deterministic.
+   - Assert the first two are kept and the compressor does not re-rank from record fields.
 
-4. RAG evidence trimming prefers higher confidence.
-   - Build canon and voice `RetrievalResult` items with mixed confidence.
+4. RAG evidence trimming preserves provider result order.
+   - Build canon and voice results in an explicit upstream order.
    - Set evidence limit to 2.
-   - Assert lower-confidence ids are dropped, with source-order tie behavior.
+   - Assert the first two in each section remain.
 
 5. Style examples are trimmable.
    - Build many style examples under a small budget.
@@ -479,56 +464,57 @@ Recommended focused tests:
 
 11. Protected floor over budget is observable.
     - Set an unrealistically tiny max budget.
-    - Assert protected sections remain and `over_budget_after_protected=true`.
+    - Assert protected sections remain, `status=protected_floor_exceeded`, and
+      `over_budget_chars > 0`.
+
+12. T-0135 is unchanged.
+    - Compare enabled and disabled turns with a recording embedding provider.
+    - Assert the semantic embedding requests, canonical query text, and call count are identical.
+    - Assert the compressor never activates the `character_examples` semantic role.
 
 ## 9. Risks / Open Questions
 
 - Character count is not token count. It is deterministic, but it cannot guarantee provider token
   fit exactly.
-- Current `ContextBuilder` does not receive memory retrieval score. v0.1 can rank by
-  `MemoryRecord.importance` and `confidence`; true score ranking needs a small interface change.
+- The compressor intentionally trusts upstream Memory/Evidence order. Retrieval quality remains
+  owned by T-0135 and the retrieval providers.
 - If the configured budget is lower than protected content, the final prompt can still exceed the
   limit. This must be visible in metadata and trace.
 - Trimming style examples may affect voice consistency. That is acceptable for v0.1 only if
   manager agrees that identity/rules are more important than examples.
-- RAG evidence confidence is not always meaningful across providers. Source order remains the
-  deterministic tie-breaker.
+- Style-example ids are synthetic positional ids in v0.1. Reordering the curated bank changes
+  those ids, but does not change Character documents or introduce vector selection.
 - Section metadata will become more detailed. It should contain ids, scores, and counts, not full
   dropped text.
-- If existing `memory_ids` / `evidence_ids` metadata semantics mean "all selected before
-  compression", changing them to post-compression ids could surprise prompt-log consumers.
+- Public `used_memory_ids` and the existing top-level prompt metadata continue to describe
+  retrieval. Prompt inclusion is separately observable under `context_budget`.
 
-## 10. Required Manager Decisions
+## 10. Manager Decisions
 
-1. Approve adding `ContextCompressorPort` and injecting a compressor into `ContextBuilder`.
+1. Approved: add `ContextCompressorPort` and inject a compressor into `ContextBuilder`.
 
-2. Confirm rollout default:
-   - recommendation: `AEMEATH_ENABLE_CONTEXT_BUDGET=false` in v0.1;
-   - alternative: enable by default after focused prompt-quality review.
+2. Approved rollout default: `AEMEATH_ENABLE_CONTEXT_BUDGET=false` in v0.1.
 
-3. Confirm v0.1 budget unit:
-   - recommendation: deterministic char count with `budget_unit="chars"`.
+3. Approved budget unit: deterministic compiled-message character count.
 
-4. Confirm default limits:
-   - recommendation: `MAX_CHARS=24000`, recent messages `8`, memories `4`, evidence `4`.
+4. Approved limits: `MAX_CHARS=24000`, recent messages `8`, memories `4`, Canon evidence `4`,
+   and Voice evidence `4`.
 
-5. Confirm protected sections:
-   - recommendation: never trim base instructions, character context, persona rules, speech
-     rules, boundaries, forbidden claims, avoid, relationship state, or current user input.
+5. Approved protected sections: base instructions, character context, persona rules, speech rules,
+   boundaries, forbidden claims, avoid, relationship state, and current user input.
 
-6. Confirm memory ranking:
-   - recommendation: use importance, confidence, original order in v0.1;
-   - manager decision needed if retrieval score must be included now.
+6. Memory/Evidence ordering approved:
+   - preserve upstream order and do not re-rank in the compressor.
 
-7. Confirm metadata semantics:
-   - should existing `memory_ids` and `evidence_ids` mean final kept ids, or all pre-budget
-     selected ids?
+7. Metadata semantics approved:
+   - existing `memory_ids` and `evidence_ids` remain pre-budget retrieval ids;
+   - final kept/dropped ids live under `context_budget`.
 
-8. Confirm trace event:
-   - recommendation: add `context_budget_applied` with ids/counts/estimates only.
+8. Approved trace event: add `context_budget_applied` with ids/counts/estimates only.
 
-9. Confirm whether to add a separate style-example limit env var:
-   - recommendation: no separate style config in v0.1; use total budget and trim order.
+9. Style-example behavior approved:
+   - no separate style config or vector selection;
+   - remove the section entirely when every example is dropped.
 
-10. Confirm whether prompt-log inspector should display budget summary in v0.1 or wait for a
-    later observability polish pass.
+10. Prompt-log inspector display polish is deferred; the JSONL record already contains the full
+    safe budget report.

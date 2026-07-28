@@ -97,6 +97,11 @@ class ContextBuilderPort(Protocol):
         ...
 
 
+class ContextCompressorPort(Protocol):
+    def compress(self, *, context: PromptContext) -> PromptContext:
+        ...
+
+
 class ResponseGeneratorPort(Protocol):
     def generate(
         self,

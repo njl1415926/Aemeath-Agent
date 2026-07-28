@@ -1884,3 +1884,47 @@ Validation:
 - `ruff check .`: passed.
 - `python -m compileall -q app tests`: passed.
 - `git diff --check`: passed; Windows checkout reported only expected CRLF conversion warnings.
+
+### T-0136 Deterministic Prompt Context Budget v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 14: Context Budget And Compression
+- Manager Session for final contract review
+
+Goal:
+- Add a deterministic, optional prompt-size guard after context assembly without changing Semantic
+  Query, retrieval, Character source selection, or model-provider interfaces.
+
+Scope:
+- Added `ContextCompressorPort`, `ContextBudgetPolicy`, `NoopContextCompressor`, and
+  `DeterministicContextCompressor`.
+- Added exact compiled-message character estimation shared with `PromptCompiler`.
+- Added default-off settings for 24000 chars, 8 recent messages, 4 Memories, and 4 results per Canon
+  and Voice section.
+- Protected identity/rules, safety boundaries, relationship state, unknown sections, and current
+  input. Optional sections trim in Style, Voice, Canon, Memory, Recent order while preserving
+  upstream item order.
+- Added safe `context_budget` metadata plus `context_budget_applied` trace without removed content.
+- CLI and FastAPI share the same policy through the existing composition root.
+
+Boundary:
+- No tokenizer, LLM summary, vector selection, secondary embedding call, cross-turn cache, or
+  Persistence change was added.
+- Existing public memory/evidence ids retain retrieval semantics; final Prompt membership is exposed
+  only under the budget report.
+- The default remains disabled pending real prompt-quality evaluation.
+
+Manager acceptance:
+- Accepted on 2026-07-28 with no blocking or non-blocking implementation findings.
+- Manager added one regression test covering the complete cross-section trim priority.
+- Remaining product risks are the character-count/token-count difference, allowed protected-floor
+  overflow, and voice-quality impact when Style examples are removed.
+
+Validation:
+- Focused Context/Semantic/Prompt/Observability suite: 53 passed before the Manager priority test.
+- Final full suite: 438 passed.
+- `ruff check .`: passed.
+- `python -m compileall -q app tests`: passed.
+- `git diff --check`: passed; Windows checkout reported only expected CRLF conversion warnings.

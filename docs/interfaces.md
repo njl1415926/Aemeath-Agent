@@ -390,6 +390,7 @@ v0.3 Memory 扩展说明：
 
 - `app/agent/prompt_context.py`
 - `app/agent/context_builder.py`
+- `app/agent/context_budget.py`
 
 ### PromptSection
 
@@ -418,16 +419,36 @@ v0.3 Memory 扩展说明：
 ```text
 ContextBuilder.build_context()
   -> PromptContext
+  -> ContextCompressorPort.compress()
   -> PromptCompiler.compile_messages()
   -> list[dict[str, str]]
 ```
 
 扩展约束：
 
-- 未来 token budget、prompt snapshot、eval、critic、trace 都应优先读取 `PromptContext`。
+- prompt snapshot、eval、critic、trace 都应优先读取 `PromptContext`。
 - 新增 prompt section 时应有稳定 `section.id`，便于 trace 和 eval 引用。
 - `ContextBuilder` 负责汇聚上下文，`PromptCompiler` 负责输出模型消息格式。
 - `DialogueController` 应显式调用 `build_context()`，记录 prompt section 摘要后再编译 messages，避免 `PromptContext` 只停留在内部实现。
+
+### ContextCompressorPort
+
+```python
+class ContextCompressorPort(Protocol):
+    def compress(self, *, context: PromptContext) -> PromptContext:
+        ...
+```
+
+当前实现包括 `NoopContextCompressor` 和 `DeterministicContextCompressor`。后者遵守以下契约：
+
+- 输入是完整的 pre-budget `PromptContext`，因此不得重新检索、调用 embedding 或改变上游排序。
+- 受保护 section、未知 section 和当前 `user_input` 不可裁剪。
+- 可裁 section 按 Style、Voice、Canon、Memory、Recent 的顺序删除完整 item。
+- 映射不完整或 section id 重复时 fail safe，相关 section 不参与裁剪。
+- 删除内容不得进入 metadata、trace 或 prompt-run log；只记录 ids、计数、估算和 reason。
+- 字符预算不是模型 token 上限；protected floor 可以明确超出目标值。
+- 顶层 `memory_ids` / `evidence_ids` 和公开 `used_memory*` 继续表示检索事实，最终 Prompt
+  成员以 `context_budget.kept_source_ids` / `dropped_source_ids` 为准。
 
 ## Character Interfaces
 

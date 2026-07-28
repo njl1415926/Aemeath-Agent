@@ -77,6 +77,17 @@ def test_prompt_builder_contains_expected_sections():
     assert "The user focuses on the memory mechanism." in messages[0]["content"]
     assert "DEEPSEEK_API_KEY" not in messages[0]["content"]
 
+    context = builder.build_context(
+        character_context=character,
+        user_input="do you remember?",
+        recent_messages=recent,
+        long_term_memories=memories,
+        relationship_state=state,
+    )
+    style_section = next(section for section in context.sections if section.id == "style_examples")
+    assert style_section.source_ids == ["style_example:0001"]
+    assert style_section.metadata["source_id_kind"] == "synthetic_index"
+
 
 def test_prompt_builder_returns_structured_prompt_context():
     builder = ContextBuilder(Path("app/prompts/dialogue_prompt.v0.1.md"))
@@ -135,5 +146,9 @@ def test_prompt_builder_returns_structured_prompt_context():
         "recent_conversation",
     ]
     assert section_ids == expected_order
+    assert (
+        next(section.source_ids for section in context.sections if section.id == "style_examples")
+        == []
+    )
     assert context.metadata["evidence_ids"]["lore"] == ["lore_1"]
     assert context.metadata["evidence_ids"]["voice"] == ["voice_1"]

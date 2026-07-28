@@ -95,6 +95,34 @@ The current composition root activates only the `memory_recall` semantic role. W
 the optional context but intentionally ignores it, Character example selection is unchanged, and
 managed canonical RAG remains tooling-only until a separately approved runtime integration task.
 
+## 2026-07-28 Deterministic Prompt Context Budget
+
+T-0136 adds an optional `ContextCompressorPort` after complete `PromptContext` assembly and before
+`PromptCompiler`. It does not change Semantic Query, Memory retrieval, Evidence retrieval, or their
+upstream ordering:
+
+```text
+ContextBuilder
+  -> assemble complete PromptContext
+  -> ContextCompressorPort.compress(...)
+       -> protected sections remain intact
+       -> deterministic section limits and character-budget trimming
+       -> safe kept/dropped ids and counts in PromptContext.metadata.context_budget
+  -> PromptCompiler
+```
+
+The default remains disabled. When enabled, v0.1 uses a deterministic compiled-message character
+estimate with defaults of 24000 chars, 8 recent messages, 4 Memories, 4 Canon results, and 4 Voice
+results. Global trimming order is Style, Voice, Canon, Memory, then Recent. Character identity and
+rules, safety boundaries, relationship state, unknown sections, and the current user input are
+protected. If protected content alone exceeds the target, the prompt remains over budget and reports
+`protected_floor_exceeded`; v0.1 never truncates protected text or individual lines.
+
+The budget report contains section/source ids and counts but no removed body text. Existing
+`memory_ids`, `evidence_ids`, `used_memory_ids`, and `used_memories` retain pre-budget retrieval
+semantics; final prompt membership is represented by `context_budget.kept_source_ids` and
+`dropped_source_ids`.
+
 ## 2026-06-08 Manager Update: Session Contract v0.1
 
 Session is promoted from a transient string to a first-class runtime object. The stable identity
@@ -314,6 +342,8 @@ CLI / FastAPI adapter
 位置：
 
 - `app/agent/context_builder.py`
+- `app/agent/context_budget.py`
+- `app/agent/prompt_context.py`
 - `app/prompts/dialogue_prompt.v0.1.md`
 - `app/retrieval/schemas.py`
 - `app/retrieval/ports.py`
@@ -322,6 +352,7 @@ CLI / FastAPI adapter
 职责：
 
 - 合并角色上下文、短期对话、长期记忆、关系状态和剧情证据。
+- 按可选确定性预算裁剪已组装的 `PromptContext`。
 - 输出模型可消费的 messages。
 
 `EvidencePack` 是后续剧情知识、语音风格证据和 RAG 结果进入 prompt 的预留接口。
@@ -724,7 +755,8 @@ LangGraph 的定位是可选 runtime 编排层。它可以替换当前手写 `Di
 ## 已知技术债
 
 1. `MemoryWriteClassifier`、`StateUpdateClassifier` 和部分模块内部 policy 当前包含规则式中文关键词，且部分源码文本在 Windows 控制台显示为乱码。后续应统一检查源文件编码并增加行为测试。
-2. `ContextBuilder` 已产出 `PromptContext`，但 token budget、prompt section 裁剪和 prompt snapshot 尚未实现。
+2. `ContextBuilder` 已接入默认关闭的字符预算和 prompt section 裁剪；精确 tokenizer 预算、
+   摘要压缩和基于质量评估的默认启用仍未实现。
 3. `FallbackChatModelClient` 的 CLI/API 默认策略已经分离；后续仍可进一步完善降级响应的结构化观测。
 4. `CharacterProvider` 当前默认使用 `app/character/Aemeath.v0.2/` manifest，v0.1 YAML 仅作为兼容 fallback；后续仍需完善多角色与角色文档治理。
 5. Memory update / merge / conflict / decay 仍未真正实现，只保留了决策字段和 backlog。

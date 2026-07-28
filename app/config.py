@@ -78,6 +78,11 @@ class Settings:
     embedding_local_device: str = "auto"
     embedding_local_max_length: int = 8192
     embedding_lazy_load: bool = True
+    enable_context_budget: bool = False
+    context_budget_max_chars: int = 24_000
+    context_budget_recent_message_limit: int = 8
+    context_budget_memory_limit: int = 4
+    context_budget_evidence_limit: int = 4
 
     @staticmethod
     def from_env() -> "Settings":
@@ -204,6 +209,21 @@ class Settings:
             embedding_lazy_load=_parse_bool(
                 os.getenv("AEMEATH_EMBEDDING_LAZY_LOAD", "true")
             ),
+            enable_context_budget=_parse_bool(
+                os.getenv("AEMEATH_ENABLE_CONTEXT_BUDGET", "false")
+            ),
+            context_budget_max_chars=int(
+                os.getenv("AEMEATH_CONTEXT_BUDGET_MAX_CHARS", "24000")
+            ),
+            context_budget_recent_message_limit=int(
+                os.getenv("AEMEATH_CONTEXT_BUDGET_RECENT_MESSAGE_LIMIT", "8")
+            ),
+            context_budget_memory_limit=int(
+                os.getenv("AEMEATH_CONTEXT_BUDGET_MEMORY_LIMIT", "4")
+            ),
+            context_budget_evidence_limit=int(
+                os.getenv("AEMEATH_CONTEXT_BUDGET_EVIDENCE_LIMIT", "4")
+            ),
         )
 
     def validate(self) -> None:
@@ -235,6 +255,21 @@ class Settings:
             raise ValueError(
                 "AEMEATH_MEMORY_REPAIR_MAX_BACKOFF_SECONDS must be at least the repair interval."
             )
+        if self.context_budget_max_chars <= 0:
+            raise ValueError("AEMEATH_CONTEXT_BUDGET_MAX_CHARS must be positive.")
+        for name, value in (
+            (
+                "AEMEATH_CONTEXT_BUDGET_RECENT_MESSAGE_LIMIT",
+                self.context_budget_recent_message_limit,
+            ),
+            ("AEMEATH_CONTEXT_BUDGET_MEMORY_LIMIT", self.context_budget_memory_limit),
+            (
+                "AEMEATH_CONTEXT_BUDGET_EVIDENCE_LIMIT",
+                self.context_budget_evidence_limit,
+            ),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative.")
         if self.use_mock_llm:
             return
         if not self.deepseek_api_key:

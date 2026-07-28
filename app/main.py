@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.accounts.service import AccountService
+from app.agent.context_budget import ContextBudgetPolicy, DeterministicContextCompressor
 from app.agent.context_builder import ContextBuilder
 from app.agent.dialogue_controller import DialogueController
 from app.agent.response_generator import ResponseGenerator
@@ -106,6 +107,15 @@ def build_controller(
         semantic_query_coordinator = DisabledSemanticQueryCoordinator()
     response_generator = ResponseGenerator(chat_model)
     state_updater = StateUpdater(StateUpdateClassifier())
+    context_compressor = DeterministicContextCompressor(
+        policy=ContextBudgetPolicy(
+            enabled=settings.enable_context_budget,
+            max_chars=settings.context_budget_max_chars,
+            recent_message_limit=settings.context_budget_recent_message_limit,
+            memory_limit=settings.context_budget_memory_limit,
+            evidence_limit=settings.context_budget_evidence_limit,
+        )
+    )
     if settings.enable_prompt_run_log:
         prompt_run_logger = JsonlPromptRunLogger(root_dir=settings.prompt_run_log_root)
     else:
@@ -128,7 +138,10 @@ def build_controller(
             default_character_id=settings.default_character_id,
         ),
         evidence_provider=WorldInfoEvidenceProvider(),
-        context_builder=ContextBuilder(settings.prompt_template_path),
+        context_builder=ContextBuilder(
+            settings.prompt_template_path,
+            context_compressor=context_compressor,
+        ),
         response_generator=response_generator,
         trace_logger=trace_logger,
         prompt_run_logger=prompt_run_logger,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.agent.context_budget import NoopContextCompressor
+from app.agent.ports import ContextCompressorPort
 from app.agent.prompt_context import PromptCompiler, PromptContext, PromptSection
 from app.character.schemas import CharacterRuntimeContext
 from app.retrieval.schemas import EvidencePack
@@ -9,10 +11,16 @@ from app.schemas import MemoryRecord, MessageRecord, RelationshipState
 
 
 class ContextBuilder:
-    def __init__(self, prompt_template_path: Path):
+    def __init__(
+        self,
+        prompt_template_path: Path,
+        *,
+        context_compressor: ContextCompressorPort | None = None,
+    ):
         self.prompt_template_path = prompt_template_path
         self.prompt_template = prompt_template_path.read_text(encoding="utf-8")
         self.prompt_compiler = PromptCompiler()
+        self.context_compressor = context_compressor or NoopContextCompressor()
 
     def build_context(
         self,
@@ -45,6 +53,13 @@ class ContextBuilder:
         voice_lines = [f"- [{item.id}] {item.content}" for item in evidence_pack.voice_results]
         if not voice_lines:
             voice_lines = ["- (none)"]
+
+        style_lines = [f"- {example}" for example in character_context.style_examples]
+        style_source_ids = [
+            f"style_example:{index:04d}" for index in range(1, len(style_lines) + 1)
+        ]
+        if not style_lines:
+            style_lines = ["- (none)"]
 
         sections = [
             PromptSection(
@@ -81,8 +96,9 @@ class ContextBuilder:
             PromptSection(
                 id="style_examples",
                 title="Style examples:",
-                content_lines=[f"- {example}" for example in character_context.style_examples]
-                or ["- (none)"],
+                source_ids=style_source_ids,
+                content_lines=style_lines,
+                metadata={"source_id_kind": "synthetic_index"},
             ),
             PromptSection(
                 id="boundaries",
@@ -138,7 +154,7 @@ class ContextBuilder:
             ),
         ]
 
-        return PromptContext(
+        prompt_context = PromptContext(
             user_input=user_input,
             sections=sections,
             metadata={
@@ -151,6 +167,7 @@ class ContextBuilder:
                 "memory_ids": [m.id for m in long_term_memories],
             },
         )
+        return self.context_compressor.compress(context=prompt_context)
 
     def build_messages(
         self,

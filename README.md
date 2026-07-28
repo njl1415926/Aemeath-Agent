@@ -19,6 +19,7 @@ DeepSeek-compatible model calls, and local prompt debugging.
   SiliconFlow and local BGE-M3 remain qualification-gated.
 - Standalone memory extraction worker and manual extraction command.
 - Prompt context assembled as structured sections before model calls.
+- Optional deterministic prompt context budget with protected role and safety sections.
 - Local JSONL prompt-run logs under `.aemeath/sessions/`.
 - Prompt log inspector for debugging prompt, RAG, memory, and response behavior.
 - Mock model mode for local testing without an API key.
@@ -175,6 +176,24 @@ keyword and explicit-recall fallbacks remain available when semantic resolution
 is skipped or temporarily unavailable. Canonical RAG and Character example
 selection do not consume this context yet.
 
+## Prompt Context Budget
+
+The context budget is disabled by default. Enable the deterministic v0.1 policy with:
+
+```env
+AEMEATH_ENABLE_CONTEXT_BUDGET=true
+AEMEATH_CONTEXT_BUDGET_MAX_CHARS=24000
+AEMEATH_CONTEXT_BUDGET_RECENT_MESSAGE_LIMIT=8
+AEMEATH_CONTEXT_BUDGET_MEMORY_LIMIT=4
+AEMEATH_CONTEXT_BUDGET_EVIDENCE_LIMIT=4
+```
+
+The policy trims optional Style, Voice, Canon, Memory, and Recent sections in that order. Character
+identity, role rules, safety boundaries, relationship state, unknown sections, and the current user
+message are never truncated. This is a deterministic character-count guardrail rather than an exact
+model-token limit. Prompt-run metadata records kept/dropped ids and counts without storing removed
+content.
+
 ## Prompt Logs
 
 Prompt-run logging is enabled by default:
@@ -256,7 +275,7 @@ ruff check .
 Current development-checkpoint validation:
 
 ```text
-422 passed
+438 passed
 All checks passed
 ```
 
