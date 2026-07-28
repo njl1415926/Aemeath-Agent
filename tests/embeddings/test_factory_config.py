@@ -22,7 +22,6 @@ from app.memory.runtime import build_memory_embedding_provider
 
 REVIEW_PROFILE_IDS = (
     "local_bge_m3_v1",
-    "siliconflow_pro_bge_m3_v1",
 )
 
 EMBEDDING_ENV_NAMES = (
@@ -99,6 +98,27 @@ def test_factory_hash_requires_explicit_opt_in_and_creates_independent_instances
     request = EmbeddingRequest(texts=("factory order",), purpose="query")
     assert first.embed(request).signature == approved.signature
     assert second.embed(request).signature == approved.signature
+
+
+def test_factory_accepts_canonical_approved_siliconflow_profile() -> None:
+    approved = load_embedding_space_profile("siliconflow_pro_bge_m3_v1")
+    requested_secret_names: list[str] = []
+
+    def test_secret_lookup(name: str) -> str:
+        requested_secret_names.append(name)
+        return "test-only-siliconflow-key"
+
+    provider = create_embedding_provider(
+        approved,
+        EmbeddingRuntimeOptions(allow_hash=False),
+        secret_resolver=test_secret_lookup,
+    )
+
+    assert isinstance(provider, EmbeddingProviderPort)
+    assert provider.signature == approved.signature
+    assert provider.model_name == "Pro/BAAI/bge-m3"
+    assert provider.dimension == 1024
+    assert requested_secret_names == ["SILICONFLOW_API_KEY"]
 
 
 @pytest.mark.parametrize("profile_id", REVIEW_PROFILE_IDS)

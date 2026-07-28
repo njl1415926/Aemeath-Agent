@@ -204,10 +204,11 @@ The managed builder uses the Embedding Foundation batch-first `EmbeddingProvider
 `purpose=document`. The query path consumes a provider-neutral `ResolvedQueryEmbedding` with
 `purpose=query` when using `DirectQueryEmbeddingSource`.
 
-Only approved exact profiles can build or query a managed generation. At the time of this design,
-`deterministic_hash_v1` is the only approved profile and additionally requires explicit
-`--allow-hash`. Local BGE-M3 and SiliconFlow profiles remain under review and cannot enter the
-managed ready path until separately approved. There is no implicit Hash fallback.
+Only approved exact profiles can build or query a managed generation. `deterministic_hash_v1`
+requires explicit `--allow-hash`; `siliconflow_pro_bge_m3_v1` is also approved and can be selected
+when `SILICONFLOW_API_KEY` is configured. Local BGE-M3 remains under review and cannot enter the
+managed ready path until separately approved. There is no implicit Hash fallback. This approval
+does not activate managed vector RAG in the dialogue runtime.
 
 The old `data/aemeath_rag.sqlite`, `upsert_chunks()`, and `search()` path remains a one-release
 legacy compatibility shim. It is not a managed generation and is not reused by the new builder.

@@ -1,6 +1,6 @@
 {
   "schema_version": "embedding-space-profile/v1",
-  "release_status": "review",
+  "release_status": "approved",
   "profile_id": "siliconflow_pro_bge_m3_v1",
   "provider": "siliconflow",
   "model_id": "Pro/BAAI/bge-m3",
@@ -15,9 +15,12 @@
   "canary_set_version": "bge_m3_canary_v1",
   "canary_artifact": "canaries/bge_m3_canary_v1.json",
   "canary_artifact_sha256": "sha256:cbde65c5acffa89df7a1b4db06c819b9dca480113e3491ba64af55b593666ec3",
-  "baseline_artifact": null,
-  "baseline_artifact_sha256": null,
+  "baseline_artifact": "baselines/siliconflow_pro_bge_m3_v1_bge_m3_canary_v1.f32le",
+  "baseline_artifact_sha256": "sha256:2636ec030d9d8bf123ad0e3ab016b20f36bca8de259756d93c26b1a3f0762b63",
   "fingerprint_algorithm": "baseline-relative-mask-v1",
-  "expected_fingerprint": null,
-  "qualification_thresholds": null
+  "expected_fingerprint": "sha256:9117a6ed90373361c1374c4b87e065c451ac4e38e9ee3abc8735317b70b1d64e",
+  "qualification_thresholds": {
+    "min_cosine_per_vector": 0.9999,
+    "max_abs_coordinate_delta": 0.003
+  }
 }

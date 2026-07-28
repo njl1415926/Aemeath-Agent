@@ -258,3 +258,11 @@ canonical RAG、Character example selection、Context Budget 和跨轮 cache 均
 最终验证：全量 `pytest` 422 项通过；`ruff check .`、
 `python -m compileall -q app tests` 和 `git diff --check` 均通过。diff check 仅输出 Windows
 checkout 的预期 CRLF conversion warning，没有 whitespace error。
+
+## 8. 后续 Profile 发布说明（2026-07-28）
+
+T-0135 验收时两个 BGE Profile 保持 `review` 的记录属于当时事实。后续 T-0138 使用治理后的
+canonical canary 重新完成 capture 和 verify，并单独批准了
+`siliconflow_pro_bge_m3_v1`。Semantic Query 接口与调用次数契约未改变；启用长期 Memory
+时，它现在可以通过 composition root 共享该 approved SiliconFlow Provider。Local BGE 仍为
+`review`，World Info 仍忽略 Semantic Context，managed vector RAG 仍未接入对话运行时。

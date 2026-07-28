@@ -1705,3 +1705,11 @@ schema、业务降级或job状态语义。
 
 在各下游任务独立完成并通过审查前，不启用主运行时向量World Info RAG，不把query
 embedding职责放入DialogueController，也不删除旧import和配置兼容层。
+
+## 13. T-0138 发布状态更新（2026-07-28）
+
+本设计中的发布门禁已由 T-0138 对 SiliconFlow Profile 独立执行：基于当前 canonical canary
+重新 capture 候选，人工确认逐向量 cosine 与坐标偏差，提交版本化 baseline，正式 verify
+通过后再将 `siliconflow_pro_bge_m3_v1` 晋升为 `approved`。本地 BGE Profile 仍保持
+`review`。该状态更新不改变 Foundation Port、signature、Factory 门禁、日志脱敏或禁止隐式
+Hash fallback 的设计。

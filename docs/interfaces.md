@@ -941,6 +941,12 @@ canonical profiles whose release status is `approved`. The old
 `AEMEATH_MEMORY_EMBEDDING_PROVIDER` and `AEMEATH_MEMORY_EMBEDDING_MODEL_PATH` settings remain a
 one-release Memory compatibility path and must not define new canonical vector spaces.
 
+Current approved Profiles are `siliconflow_pro_bge_m3_v1` for API-backed 1024-dimensional
+Memory/Semantic retrieval and `deterministic_hash_v1` for tests or explicit development. Hash still
+requires `AEMEATH_EMBEDDING_ALLOW_HASH=true`; SiliconFlow must use the fixed
+`SILICONFLOW_API_KEY` secret boundary and must not fall back to Hash. `local_bge_m3_v1` remains
+`review`.
+
 `MemoryStore` currently exposes both legacy and canonical methods:
 
 - compatibility: `upsert_memory_embedding(...)`, `search_memory_embeddings(...)`;

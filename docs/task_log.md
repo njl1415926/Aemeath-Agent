@@ -1648,8 +1648,8 @@ Scope:
 
 Release decision:
 - `deterministic_hash_v1` is approved for deterministic tests and explicit development.
-- `siliconflow_pro_bge_m3_v1` and `local_bge_m3_v1` remain `review`; runtime code must not bypass the
-  approval gate.
+- T-0138 later qualified and approved `siliconflow_pro_bge_m3_v1` for normal API-backed runtime.
+  `local_bge_m3_v1` remains `review`; runtime code must not bypass the approval gate.
 - Provider failures never trigger an implicit Hash fallback.
 
 Validation:
@@ -1823,9 +1823,9 @@ Final Manager acceptance:
 - Full ready-generation validation currently runs during registry resolution. Before managed RAG is
   wired into the dialogue hot path, benchmark this behavior and, if needed, add a correctness-safe
   validated-handle cache keyed by immutable active-generation identity.
-- BGE-M3/SiliconFlow profile approval, production corpus build review, and active
-  `EvidenceProviderPort` composition remain separate follow-up gates. The World Info provider stays
-  active until those gates are explicitly approved.
+- T-0138 later completed SiliconFlow BGE-M3 Profile approval. Production corpus build review and
+  active `EvidenceProviderPort` composition remain separate follow-up gates. The World Info provider
+  stays active until those gates are explicitly approved.
 
 ### T-0135 Semantic Query Shared Turn Context v0.1
 
@@ -1859,8 +1859,9 @@ Boundary:
 - Managed canonical RAG remains tooling-only; Character example selection remains static.
 - No query/vector persistence, cross-turn cache, Context Budget, Persistence schema, Profile
   approval, or implicit Hash fallback was added.
-- SiliconFlow and local BGE-M3 profiles remain `review` and require fresh qualification after the
-  canonical canary formatting change.
+- At T-0135 acceptance, SiliconFlow and local BGE-M3 remained `review` and required fresh
+  qualification after the canonical canary formatting change. T-0138 later approved only the
+  SiliconFlow Profile; local BGE-M3 remains `review`.
 
 Cross-worker review:
 - Embedding Foundation accepted the wrapper, Local BGE token guard, exception behavior, and
@@ -1876,8 +1877,8 @@ Cross-worker review:
 Manager acceptance:
 - Accepted on 2026-07-28 after five cross-worker reviews and final canary governance.
 - `bge_m3_canary_v1.json` is UTF-8 without BOM, uses LF, and has exactly one trailing LF.
-- Both BGE profiles reference the new canonical artifact digest but remain in `review`; older
-  qualification candidates are stale and must not be approved.
+- Both BGE profiles reference the new canonical artifact digest. Older qualification candidates are
+  stale and must not be approved; T-0138 used a fresh candidate to approve only SiliconFlow.
 
 Validation:
 - Full suite: 422 passed.
@@ -1928,3 +1929,75 @@ Validation:
 - `ruff check .`: passed.
 - `python -m compileall -q app tests`: passed.
 - `git diff --check`: passed; Windows checkout reported only expected CRLF conversion warnings.
+
+### T-0137 Data Evolution Contract v0.1
+
+Status: `pending`
+
+Priority:
+- Before external multi-user beta; deferred during the current local runtime validation.
+
+Goal:
+- Keep existing Sessions, source messages, Character behavior, and derived Memory data evolvable
+  after real conversations have been created.
+
+Planned scope:
+- Record the Character revision used by each Session and define compatible upgrade behavior.
+- Add explicit Memory schema and extraction-policy revisions without changing source-message truth.
+- Define re-extraction, supersession, archive, rollback, and backup rules for derived Memories.
+- Preserve exact-signature embedding artifacts as rebuildable derived data.
+- Add raw SQLite and SQLAlchemy migration/contract tests before enabling the policy for production
+  data.
+
+Boundary:
+- This task is documentation/backlog only in the current cycle. No schema, Session, Character, or
+  Memory runtime change is included yet.
+
+### T-0138 SiliconFlow BGE-M3 Profile Qualification And Runtime Activation
+
+Status: `done`
+
+Owner:
+- Manager Session
+
+Goal:
+- Complete the real SiliconFlow `Pro/BAAI/bge-m3` qualification gate and make its canonical Profile
+  available to the normal Memory/Semantic runtime without bypassing Foundation safety checks.
+
+Required work:
+- Capture a fresh candidate against the current version-controlled BGE canary artifact.
+- Review per-observation cosine and coordinate-delta metrics and freeze explicit thresholds.
+- Commit the reviewed binary baseline and exact digests while the Profile remains `review`.
+- Run a real API `verify`, then separately promote the Profile to `approved` only after it passes.
+- Select the approved Profile in local `.env`, disable Hash, and smoke-test Memory query/document
+  embedding through the normal Factory.
+- Update Embedding, architecture, configuration, and validation documentation.
+
+Boundary:
+- Do not expose the SiliconFlow API key, provider response bodies, canary text, or vectors.
+- Do not delete deterministic Hash artifacts; exact-signature spaces remain valid side by side.
+- Do not switch active World Info evidence retrieval or managed vector RAG in this task.
+
+Delivery:
+- Captured a fresh candidate from the current canonical `bge_m3_canary_v1` artifact and committed a
+  24,576-byte float32 baseline for six 1024-dimensional canaries.
+- Approved thresholds are cosine per vector >= `0.9999` and maximum absolute coordinate delta <=
+  `0.003`. Fresh capture and independent/default-batch verification both passed.
+- The committed baseline digest is
+  `sha256:2636ec030d9d8bf123ad0e3ab016b20f36bca8de259756d93c26b1a3f0762b63`; the
+  qualification fingerprint is
+  `sha256:9117a6ed90373361c1374c4b87e065c451ac4e38e9ee3abc8735317b70b1d64e`.
+- Formal API verification observed minimum cosine `0.9999483512870173` and maximum coordinate delta
+  `0.0024224817752838135`; every batch and single-order observation passed.
+- Promoted `siliconflow_pro_bge_m3_v1` to `approved` only after formal verification. Normal Factory
+  query/document calls returned the canonical 1024-dimensional signature.
+- Local `.env` now selects the SiliconFlow Profile with Hash disabled. A temporary-database smoke
+  created a Memory fact, wrote its document artifact, and recalled it through embedding similarity.
+- Existing deterministic Hash artifacts were retained. Active evidence remains
+  `WorldInfoEvidenceProvider`; managed vector RAG was not wired into the dialogue runtime.
+
+Validation:
+- Embedding/Memory/Semantic focused suite: 174 passed.
+- Full project regression: 437 passed.
+- Ruff, compileall, wheel resource packaging, and diff checks passed. Details are recorded in
+  `docs/agents_communication/siliconflow_bge_m3_profile_approval_delivery.md`.

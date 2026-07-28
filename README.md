@@ -15,8 +15,8 @@ DeepSeek-compatible model calls, and local prompt debugging.
 - Recent conversation as the always-available short-term memory baseline.
 - Optional LLM-extracted long-term memory with explicit and window triggers.
 - Scope-aware memory recall: `user_global`, `character`, and `session`.
-- Approved deterministic Hash embeddings for tests and explicit development;
-  SiliconFlow and local BGE-M3 remain qualification-gated.
+- Approved SiliconFlow BGE-M3 embeddings for normal Memory/Semantic runtime, plus deterministic
+  Hash embeddings for tests and explicit development; local BGE-M3 remains qualification-gated.
 - Standalone memory extraction worker and manual extraction command.
 - Prompt context assembled as structured sections before model calls.
 - Optional deterministic prompt context budget with protected role and safety sections.
@@ -136,20 +136,27 @@ Do not commit `.env` or real API keys.
 
 ## Long-term Memory
 
-Long-term memory is disabled by default. Enable the v0.3 runtime in `.env`:
+Long-term memory is disabled by default. For real semantic retrieval through the approved
+SiliconFlow BGE-M3 Profile, configure `.env` with:
 
 ```env
 AEMEATH_ENABLE_LONG_TERM_MEMORY=true
-AEMEATH_EMBEDDING_PROFILE=deterministic_hash_v1
-AEMEATH_EMBEDDING_ALLOW_HASH=true
+AEMEATH_EMBEDDING_PROFILE=siliconflow_pro_bge_m3_v1
+AEMEATH_EMBEDDING_ALLOW_HASH=false
+SILICONFLOW_API_KEY=your_siliconflow_api_key
 ```
 
-The deterministic hash provider has no additional model dependency and is
-approved only for tests and explicit development. The legacy
+`siliconflow_pro_bge_m3_v1` is a version-controlled, qualified 1024-dimensional
+`Pro/BAAI/bge-m3` vector space. Its API key remains local runtime configuration and must not be
+committed. The deterministic Hash Profile has no additional model dependency and remains approved
+only for tests and explicit development. Select it explicitly with
+`AEMEATH_EMBEDDING_PROFILE=deterministic_hash_v1` and `AEMEATH_EMBEDDING_ALLOW_HASH=true`.
+
+The legacy
 `AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash` setting remains available for one
 compatibility release and resolves through the same approved-profile gate.
-SiliconFlow and local BGE-M3 profiles cannot be selected by the normal runtime
-until their qualification profiles are separately approved.
+The local BGE-M3 Profile remains unavailable to normal runtime until separately qualified and
+approved. Provider failures never trigger an implicit Hash fallback.
 
 The CLI can extract recent messages synchronously:
 
@@ -249,9 +256,10 @@ python -m app.retrieval.manage_rag_index query --profile deterministic_hash_v1 -
 ```
 
 The managed root defaults to `data/rag_indexes` and can be changed with
-`AEMEATH_RAG_INDEX_ROOT`. Hash requires explicit approval on every build/query;
-local BGE-M3 and SiliconFlow profiles remain unavailable until separately
-approved.
+`AEMEATH_RAG_INDEX_ROOT`. Hash requires explicit approval on every build/query. The approved
+SiliconFlow Profile may be selected by the standalone managed-index tooling when its API key is
+configured, but vector RAG is still not wired into the dialogue runtime. Local BGE-M3 remains
+unavailable until separately approved.
 
 ## Upgrading From v0.2
 
@@ -275,7 +283,7 @@ ruff check .
 Current development-checkpoint validation:
 
 ```text
-438 passed
+437 passed
 All checks passed
 ```
 

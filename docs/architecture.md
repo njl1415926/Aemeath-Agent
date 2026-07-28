@@ -36,9 +36,10 @@ Embedding is now a shared infrastructure capability rather than a Retrieval-owne
 - `app/embeddings/` owns the batch-first `EmbeddingProviderPort`, versioned
   `EmbeddingSpaceProfile`, exact `EmbeddingModelSignature`, provider factory, qualification probes,
   typed errors, and embedding observability.
-- `deterministic_hash_v1` is the only approved profile and is intended for deterministic tests and
-  explicit development use. SiliconFlow BGE-M3 and local BGE-M3 profiles remain behind the
-  qualification and approval gate.
+- `siliconflow_pro_bge_m3_v1` is approved for normal API-backed Memory/Semantic runtime;
+  `deterministic_hash_v1` remains approved for deterministic tests and explicit development only.
+  Local BGE-M3 remains behind the qualification and approval gate. No provider failure may trigger
+  an implicit Hash fallback.
 - Memory and RAG persistence can store multiple canonical embedding artifacts for one target. The
   artifact identity is `target id + signature fingerprint + purpose`; full canonical signature,
   content hash, vector format, dimension, vector digest, and current target content are validated
@@ -61,6 +62,13 @@ exact-signature gaps. The single Memory Worker repairs bounded gap pages on an i
 with failure backoff. Other signatures remain valid coexisting spaces. The active dialogue RAG
 provider remains `WorldInfoEvidenceProvider`, so this Memory integration does not change the RAG
 runtime path.
+
+As of T-0138, the local composition root can select the approved SiliconFlow Profile through
+`AEMEATH_EMBEDDING_PROFILE=siliconflow_pro_bge_m3_v1`. Memory extraction, repair, recall, and the
+turn-level Semantic Query coordinator share one synchronized 1024-dimensional Provider instance.
+Existing Hash artifacts remain valid side-by-side derived data, but exact-signature queries never
+mix them with SiliconFlow artifacts. Managed vector RAG remains a standalone tool and World Info
+remains the active dialogue evidence provider.
 
 ## 2026-07-28 Shared Turn Semantic Query
 

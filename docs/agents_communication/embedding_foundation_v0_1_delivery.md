@@ -174,3 +174,16 @@ deprecation warning，无失败。
 4. Hash approved Profile仅作为离线smoke、SiliconFlow/本地BGE继续review的发布边界。
 
 复审通过前不继续实施Persistence、Memory、RAG或Semantic Query接入。
+
+## 8. Manager 发布更新（2026-07-28）
+
+T-0138 已使用当前版本控制的 canonical canary 重新执行真实 SiliconFlow capture、人工指标
+复核和正式 verify。`siliconflow_pro_bge_m3_v1` 现已提交 1024 维 float32 baseline，并从
+`review` 晋升为 `approved`；`local_bge_m3_v1` 仍为 `review`。
+
+批准阈值为每条向量 cosine 不低于 `0.9999`，最大坐标绝对偏差不高于 `0.003`。正式 verify
+的所有 batch 与 single-order observation 均通过。普通 Factory 的 query/document 调用以及
+临时数据库中的 Memory artifact 写入和 embedding recall 烟测也已通过。Hash 仍仅用于测试和
+显式开发，不是 SiliconFlow 失败时的 fallback；World Info RAG 激活边界未改变。
+
+完整发布证据见 `docs/agents_communication/siliconflow_bge_m3_profile_approval_delivery.md`。
