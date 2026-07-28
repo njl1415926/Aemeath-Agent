@@ -20,6 +20,9 @@ from app.observability.ports import PromptRunLoggerPort, TraceLoggerPort
 from app.observability.schemas import ConversationRun, PromptRunRecord, TraceEvent
 from app.retrieval.ports import EvidenceProviderPort
 from app.schemas import AgentTurnInput, AgentTurnOutput, UsedMemory
+from app.semantic.disabled import DisabledSemanticQueryCoordinator
+from app.semantic.ports import SemanticQueryCoordinatorPort
+from app.semantic.schemas import SemanticMessage, SemanticTurnInput
 from app.session.ports import SessionStorePort
 from app.state.store import RelationshipStore
 from app.utils.ids import new_id, utc_now
@@ -43,6 +46,7 @@ class DialogueController:
         response_generator: ResponseGeneratorPort,
         trace_logger: TraceLoggerPort,
         prompt_run_logger: PromptRunLoggerPort,
+        semantic_query_coordinator: SemanticQueryCoordinatorPort | None = None,
     ):
         self.settings = settings
         self.session_store = session_store
@@ -58,6 +62,9 @@ class DialogueController:
         self.response_generator = response_generator
         self.trace_logger = trace_logger
         self.prompt_run_logger = prompt_run_logger
+        self.semantic_query_coordinator = (
+            semantic_query_coordinator or DisabledSemanticQueryCoordinator()
+        )
         self.prompt_compiler = PromptCompiler()
 
     def _safe_trace_payload(self, value: Any) -> Any:
@@ -223,6 +230,40 @@ class DialogueController:
                 user_id=turn_input.user_id,
                 character_id=active_character_id,
             )
+            semantic_messages: list[SemanticMessage] = []
+            for message in recent_messages:
+                if message.role == "user":
+                    semantic_role = "user"
+                elif message.role == "assistant":
+                    semantic_role = "assistant"
+                else:
+                    continue
+                semantic_messages.append(
+                    SemanticMessage(
+                        id=message.id,
+                        role=semantic_role,
+                        content=message.content,
+                    )
+                )
+            semantic_context = self.semantic_query_coordinator.prepare_turn_context(
+                turn_input=SemanticTurnInput(
+                    turn_id=turn_id,
+                    user_id=turn_input.user_id,
+                    session_id=turn_input.session_id,
+                    character_id=active_character_id,
+                    current_user_message_id=user_message_id,
+                    current_input=turn_input.message,
+                    recent_messages=tuple(semantic_messages),
+                )
+            )
+            self._record_trace(
+                event_type="semantic_context_prepared",
+                turn_id=turn_id,
+                turn_input=turn_input,
+                payload=semantic_context.safe_summary(),
+                character_id=active_character_id,
+                level="warning" if semantic_context.status == "failed" else "info",
+            )
             memory_results = self.memory_reader.retrieve_query(
                 memory_query=MemoryQuery(
                     user_id=turn_input.user_id,
@@ -230,7 +271,8 @@ class DialogueController:
                     character_id=active_character_id,
                     session_id=turn_input.session_id,
                     limit=6,
-                )
+                ),
+                semantic_context=semantic_context,
             )
             retrieved_memories = [result.record for result in memory_results]
             evidence_pack = self.evidence_provider.build_evidence_pack(
@@ -238,6 +280,7 @@ class DialogueController:
                 character_id=active_character_id,
                 query=turn_input.message,
                 metadata=turn_input.metadata,
+                semantic_context=semantic_context,
             )
             self._record_trace(
                 event_type="context_sources_selected",

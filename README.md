@@ -1,11 +1,12 @@
 # Aemeath Agent
 
-Aemeath Agent v0.3 is a CLI roleplay dialogue agent based on Aemeath from
-Wuthering Waves. The runtime now combines a composable Character system, World
-Info RAG, first-class Sessions, recent conversation, optional extracted
-long-term memory, DeepSeek-compatible model calls, and local prompt debugging.
+Aemeath Agent is a CLI roleplay dialogue agent based on Aemeath from Wuthering
+Waves. Its v0.3 baseline and current development checkpoint combine a composable
+Character system, World Info RAG, first-class Sessions, recent conversation,
+optional extracted long-term memory, a shared turn-level semantic query,
+DeepSeek-compatible model calls, and local prompt debugging.
 
-## v0.3 Features
+## v0.3 Baseline And Current Checkpoint Features
 
 - CLI multi-turn dialogue.
 - Character v0.2 manifest loaded from `app/character/Aemeath.v0.2/`.
@@ -14,7 +15,8 @@ long-term memory, DeepSeek-compatible model calls, and local prompt debugging.
 - Recent conversation as the always-available short-term memory baseline.
 - Optional LLM-extracted long-term memory with explicit and window triggers.
 - Scope-aware memory recall: `user_global`, `character`, and `session`.
-- Hash embeddings by default, with optional local BGE-M3 embeddings.
+- Approved deterministic Hash embeddings for tests and explicit development;
+  SiliconFlow and local BGE-M3 remain qualification-gated.
 - Standalone memory extraction worker and manual extraction command.
 - Prompt context assembled as structured sections before model calls.
 - Local JSONL prompt-run logs under `.aemeath/sessions/`.
@@ -166,6 +168,13 @@ bounded batches. Repair cadence and backoff use
 `AEMEATH_MEMORY_REPAIR_BATCH_SIZE`, `AEMEATH_MEMORY_REPAIR_INTERVAL_SECONDS`,
 and `AEMEATH_MEMORY_REPAIR_MAX_BACKOFF_SECONDS`.
 
+When long-term Memory is enabled, the dialogue runtime constructs one turn-local
+semantic query and shares its resolved embedding with Memory recall. The query
+and vector are not persisted. Memory does not issue a second query embedding;
+keyword and explicit-recall fallbacks remain available when semantic resolution
+is skipped or temporarily unavailable. Canonical RAG and Character example
+selection do not consume this context yet.
+
 ## Prompt Logs
 
 Prompt-run logging is enabled by default:
@@ -244,10 +253,10 @@ pytest
 ruff check .
 ```
 
-Current release validation:
+Current development-checkpoint validation:
 
 ```text
-380 passed
+422 passed
 All checks passed
 ```
 

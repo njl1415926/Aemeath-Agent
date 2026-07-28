@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from app.retrieval.schemas import EvidencePack, RetrievalResult
+from app.semantic.schemas import TurnSemanticContext
 
 
 class RetrieverPort(Protocol):
@@ -26,5 +27,6 @@ class EvidenceProviderPort(Protocol):
         character_id: str,
         query: str,
         metadata: dict[str, Any] | None = None,
+        semantic_context: TurnSemanticContext | None = None,
     ) -> EvidencePack:
         ...

@@ -4,7 +4,8 @@
 
 任务：T-0135 Semantic Query 共享层
 
-状态：Changes Requested；已按 2026-07-27 Manager review 修订，等待复审；尚未实施运行时代码
+状态：`design_approved`；Embedding Foundation 只读复核已通过；
+`implementation_complete_pending_cross_worker_review`
 
 ## 0. 结论摘要
 
@@ -108,6 +109,7 @@ app/semantic/
   __init__.py
   schemas.py          # turn input、role、request、resolution、context、safe summary
   ports.py            # SemanticQueryCoordinatorPort
+  errors.py           # stable config/unhealthy AemeathError 类型
   budget.py           # semantic-query-budget/v1 常量与 Unicode 安全裁剪
   query_builder.py    # turn_neutral_v0_1 的确定性构造与最近一组对话选择
   coordinator.py      # 收集、canonicalize、去重、batch、exact-signature 映射
@@ -186,6 +188,11 @@ class SemanticTurnInput:
     recent_messages: tuple[SemanticMessage, ...] = field(repr=False)
 
 
+_CANONICAL_SEMANTIC_QUERY_BUDGETS: Final = MappingProxyType({
+    "semantic-query-budget/v1": (1024, 3072, 4096, 8000),
+})
+
+
 @dataclass(frozen=True)
 class SemanticQueryBudget:
     version: Literal["semantic-query-budget/v1"] = "semantic-query-budget/v1"
@@ -193,6 +200,19 @@ class SemanticQueryBudget:
     max_dependency_utf8_bytes_per_message: int = 3072
     max_query_chars: int = 4096
     max_query_utf8_bytes: int = 8000
+
+    def __post_init__(self) -> None:
+        canonical = _CANONICAL_SEMANTIC_QUERY_BUDGETS.get(self.version)
+        actual = (
+            self.max_dependency_chars_per_message,
+            self.max_dependency_utf8_bytes_per_message,
+            self.max_query_chars,
+            self.max_query_utf8_bytes,
+        )
+        if canonical is None or actual != canonical:
+            raise SemanticQueryConfigurationError(
+                reason="semantic_query_budget_definition_mismatch"
+            )
 
 
 SemanticQueryStrategy = Literal[
@@ -220,10 +240,17 @@ class SemanticQueryRequest:
 不承担把任意消息类型静默过滤成业务输入的职责。这里的 role 过滤属于输入适配，不是查询扩写或
 检索策略。
 
-`SemanticQueryBudget` 是仓库内版本化常量，不从每个入口分别读取环境变量。修改任一阈值都必须
-发布新的 budget version，并进入 safe summary；这样 CLI、FastAPI 与 workflow 不会形成不同的
-construction contract。字符数按规范化后 Python Unicode code point 数计算，字节数按严格
-UTF-8 编码计算，label、换行和截断 marker 都计入总 query 预算。
+`_CANONICAL_SEMANTIC_QUERY_BUDGETS` 是 `MappingProxyType` 包装的只读模块常量，其中 v1 的
+canonical tuple 固定为
+`(1024, 3072, 4096, 8000)`。公开 composition 只通过
+`load_semantic_query_budget("semantic-query-budget/v1")` 取得对象；严格 `__post_init__` 仍作为
+第二道门禁，使直接构造同一 version、但修改任一阈值时也以
+`CONFIG_INVALID/semantic_query_budget_definition_mismatch` fail fast。未知 version 同样拒绝。
+
+`SemanticQueryBudget` 不从每个入口分别读取环境变量。修改任一阈值都必须发布新的 budget
+version，并进入 safe summary；同一个 version 永远只能对应一组 canonical 数值。字符数按
+规范化后 Python Unicode code point 数计算，字节数按严格 UTF-8 编码计算，label、换行和截断
+marker 都计入总 query 预算。
 
 `SemanticQueryRequest` 是 Coordinator 内部的短命对象。它不作为日志、prompt metadata、
 API DTO 或 persistence DTO 暴露。`repr=False` 只是最后一道防误打日志措施，不能替代显式
@@ -354,7 +381,9 @@ active roles 在 composition root 创建 Coordinator 时配置，不由 Controll
 
 ```python
 SemanticQueryCoordinator(
-    provider=SynchronizedEmbeddingProvider(embedding_provider),
+    provider=SynchronizedEmbeddingProvider(
+        create_embedding_provider(...)  # public Factory result: Observable(concrete)
+    ),
     active_roles=("memory_recall",),
     query_builder=NeutralTurnQueryBuilderV01(),
     query_budget=SemanticQueryBudget(),
@@ -416,12 +445,16 @@ RAG 或 Character dynamic selector 时，再在 composition root 增加对应 ro
    不合法则按第 2 条 skipped。context 中的 `query_strategy` 与
    `dependency_message_count` 始终反映预算处理后的实际 query，而不是候选历史。
 
-8000 bytes 给本地 BGE-M3 的 8192-token 上限预留了 special-token 余量，但 char/byte 预算本身
-不能替代 tokenizer 检查。为彻底禁止 Provider 语义漂移，实施时还需由 Embedding Foundation
-复核并把 `LocalBgeM3Provider` 的 query 路径改为“先无截断编码并检查长度，超限抛
-`EMBEDDING_INVALID_INPUT`，再以 `truncation=False` 推理”；不得继续静默截断。SiliconFlow
-只会收到已通过同一预算的全文。该 Foundation guard 不审批 Profile、不改变 signature，也不
-允许 Hash fallback。
+4096 chars / 8000 bytes 只是 provider-independent 的输入预算，不是 BGE-M3 8192-token 安全
+证明；不同 tokenizer 对相同字符/字节仍可能产生不同 token 数。本地 BGE query 的最终门禁必须
+来自 tokenizer 实测：以 `truncation=False` 编码，检查每行实际 attention/token 长度，任一行
+超过 `max_length=8192` 就原样抛 `EmbeddingInvalidInputError`。合法 query 必须复用这一次编码
+得到的同一组 tensors 推理，不得为检查后再次 tokenize。`EmbeddingInvalidInputError` 不能被
+宽泛异常分支映射成 unavailable。
+
+document 路径继续使用现有 `truncation=True, max_length=8192`，保持输入、向量和诊断行为不变。
+SiliconFlow 只会收到已通过 provider-independent 预算的全文。该 Foundation guard 不审批
+Profile、不改变 signature，也不允许 Hash fallback。
 
 ### 6.2 当前消息排除规则
 
@@ -684,6 +717,29 @@ Provider/Profile/secret 能在 composition-time 发现的错误必须 fail fast�
 - 没有 active role 时不创建 Provider，使用 Disabled coordinator。这是无消费者模式，不是
   失败 fallback。
 
+后续调用的异常契约固定为：
+
+```python
+class SemanticCoordinatorUnhealthyError(AemeathError):
+    # fixed: ErrorCode.SEMANTIC_COORDINATOR_UNHEALTHY
+    # fixed reason: "semantic_coordinator_unhealthy"
+    # retryable: False
+    ...
+```
+
+首次永久/契约错误仍在原调用中标记 unhealthy 后重新抛出原 typed error；Coordinator 只保存
+冻结的 `_UnhealthyState(reason_code="semantic_coordinator_unhealthy",
+cause_error_code=<stable ErrorCode>)`。它不得保存原始异常对象、异常文本、traceback、Provider
+响应、request ID 或 credential。所有后续调用必须在 Provider 前抛新的
+`SemanticCoordinatorUnhealthyError`，其 `ErrorCode` 固定为
+`SEMANTIC_COORDINATOR_UNHEALTHY`，metadata 只含上述两个安全 code/reason；HTTP 映射固定为 500。
+由于它继承 `AemeathError`，现有 `map_exception()` 可直接使用 `to_error_info()`，无需按异常文本
+猜测类别。
+
+预算 version/阈值不匹配则使用 `SemanticQueryConfigurationError`，固定
+`ErrorCode.CONFIG_INVALID` 和 reason `semantic_query_budget_definition_mismatch`，不把用户文本或
+实际阈值写入异常 metadata。
+
 ### 13.2 错误分类矩阵
 
 | 类别 | Foundation error code / 共享层校验 | 当前 turn | 后续 turn | 允许消费者降级 |
@@ -708,19 +764,31 @@ Coordinator 只捕获明确列出的 Foundation 异常；不使用 `except Excep
 现有 `EmbeddingProviderPort` 没有声明线程安全，而本地 Provider 与 SiliconFlow Provider 都有
 可变 lazy 状态。v0.1 不假设它们可并发调用，采用 correctness-first 的进程内串行保护：
 
-1. composition root 把 raw Provider 只包装一次为 `SynchronizedEmbeddingProvider`；同一
-   runtime 的 Coordinator 与 Memory document extraction 都注入该 wrapper，不能一边走 wrapper、
-   一边绕过它调用 raw Provider。
-2. wrapper 用一个 `threading.RLock` 包住完整 `embed()`，包括 lazy load/client 创建、重试、
+1. composition root 只能调用公开 `create_embedding_provider(...)`，不得调用私有
+   `_create_provider()`；Factory 返回值已经是 `ObservableEmbeddingProvider(concrete_provider)`，
+   再在外层包装一次，顺序固定为
+   `SynchronizedEmbeddingProvider(ObservableEmbeddingProvider(concrete_provider))`。
+2. “唯一 wrapper”只限定同一 runtime/composition root：该 runtime 的 Coordinator、Memory
+   Reader、Memory Extraction 必须通过对象 identity 测试确认收到同一个 wrapper，不能一边走
+   wrapper、一边绕过它调用 delegate。Memory Worker、qualification CLI、RAG build/query CLI
+   是独立 composition root，可各自拥有独立 Factory provider/wrapper 实例。
+3. wrapper 用一个 `threading.RLock` 包住完整 `embed()`，包括 lazy load/client 创建、重试、
    推理/HTTP 和结果返回；`signature` 仍是初始化后不可变的只读属性。
-3. Coordinator 另用一个 state lock 包住“检查 unhealthy -> 调用 wrapper -> 分类错误并更新
+4. wrapper 必须直接返回 delegate 的同一 `EmbeddingBatchResult` 对象，并原样重新抛出同一异常
+   对象；不得复制或改变 vectors、signature、usage、diagnostics、retry count、request ID，也不
+   新增 terminal embedding event。异常路径由 context manager/finally 保证释放锁。
+5. Coordinator 另用一个 state lock 包住“检查 unhealthy -> 调用 wrapper -> 分类错误并更新
    unhealthy”的完整 query 临界区。锁顺序固定为 Coordinator state lock 再 Provider wrapper
    lock；其他 document consumer 只取得 wrapper lock，避免死锁。
-4. 所有 request/query/vector 仍是方法局部变量，锁和 unhealthy flag 不保存 turn 数据；串行化
+6. 所有 request/query/vector 仍是方法局部变量，锁和 unhealthy flag 不保存 turn 数据；串行化
    不是 batching、cache 或跨轮状态复用。
 
 每个 Uvicorn worker 有独立 wrapper/lock。此方案牺牲同进程 Provider 并行吞吐，待 Embedding
 Foundation 另行定义并验证线程安全 capability 后才可放宽，不能仅凭实现看似可重入就移除锁。
+
+Foundation `embedding.batch_*` 的 `duration_ms` 由内层 Observable 记录，因此不包含等待外层锁的
+时间；Semantic Coordinator 的 `duration_ms` 从进入 prepare 开始计时，包含 state lock 与
+Provider wrapper lock 等待。两种 duration 不得混为同一延迟口径。
 
 ### 13.4 日志失败边界
 
@@ -740,8 +808,8 @@ Observability follow-up：由 Manager 决定是否引入覆盖全部 trace event
 
 `run_cli()` 通过 `build_agent_service()` 创建一次 runtime：
 
-- 一个进程内创建一个 raw Provider、一个共享的 `SynchronizedEmbeddingProvider` wrapper 和一个
-  Coordinator；需要 document embedding 的同一 runtime 也只拿 wrapper；
+- 一个 CLI runtime 通过公开 Factory 创建一个 Observable Provider，在外层创建一个
+  `SynchronizedEmbeddingProvider` 和一个 Coordinator；Memory Reader/Extraction 也只拿该 wrapper；
 - 每次输入创建一个新的 `TurnSemanticContext`；
 - context 只由当前 `handle_user_message()` 持有，返回后释放；
 - `/memory extract` 的 document embedding 可复用同一进程 Provider，但不复用 query
@@ -751,7 +819,8 @@ Observability follow-up：由 Manager 决定是否引入覆盖全部 trace event
 
 `create_app()` 每个 Uvicorn worker 进程创建自己的 Provider/Coordinator：
 
-- 不按 HTTP request 创建 Provider/client 或加载本地模型；raw Provider 在 worker 内只包装一次；
+- 不按 HTTP request 创建 Provider/client 或加载本地模型；每个 worker composition root 对公开
+  Factory 返回值只包装一次；
 - 不跨 worker 共享 Python 对象；
 - 每个请求拥有独立 `TurnSemanticContext`，不得保存在 `app.state`、Controller 字段或模块
   全局变量中；
@@ -764,9 +833,10 @@ Observability follow-up：由 Manager 决定是否引入覆盖全部 trace event
 ### 14.3 Memory Worker 与 RAG 工具
 
 - Memory Worker 继续创建 worker-local Provider，只处理 `document` artifacts/repair，不创建
-  `TurnSemanticContext`。
+  `TurnSemanticContext`；它是独立 composition root，不要求复用 dialogue runtime wrapper。
 - Managed RAG build/query CLI 继续是独立进程；build 使用 `document`，独立 query 工具可
-  继续使用 Direct source。它不是 dialogue turn 内重复调用问题的组成部分。
+  继续使用 Direct source。qualification CLI 与 RAG CLI 也可各自创建独立 Provider/wrapper；它们
+  不是 dialogue turn 内重复调用问题的组成部分。
 
 ### 14.4 未来 workflow / LangGraph
 
@@ -888,7 +958,8 @@ context 传给 Memory，并把该可选参数延后到 RAG Worker；但这样 T-
 
 - 不修改 `EmbeddingProviderPort`、Profile、signature 或 Factory 门禁。
 - `SynchronizedEmbeddingProvider` 实现同一个现有 Port，只增加进程内串行代理；composition root
-  持有 raw Provider，其他模块只拿 wrapper。
+  只包装公开 Factory 返回的 Observable Provider，其他同 runtime 模块只拿 wrapper；不得直接
+  调用 `_create_provider()` 或重排 Observable/Synchronized 层级。
 - 本地 BGE 的 query fail-loud token guard 不改变 canonicalization、模型、维度、signature 或
   document artifact；若 Foundation Worker 不批准直接改 Provider，则 T-0135 实施必须停下，
   不能以继续静默截断作为兼容方案。
@@ -904,6 +975,7 @@ context 传给 Memory，并把该可选参数延后到 RAG Worker；但这样 T-
 - `app/semantic/__init__.py`
 - `app/semantic/schemas.py`
 - `app/semantic/ports.py`
+- `app/semantic/errors.py`
 - `app/semantic/budget.py`
 - `app/semantic/query_builder.py`
 - `app/semantic/coordinator.py`
@@ -919,6 +991,9 @@ context 传给 Memory，并把该可选参数延后到 RAG Worker；但这样 T-
 - `app/agent/dialogue_controller.py`
 - `app/agent/ports.py`
 - `app/main.py`
+- `app/errors/codes.py`（新增 `SEMANTIC_COORDINATOR_UNHEALTHY`）
+- `app/errors/http.py`（固定映射为 HTTP 500）
+- `tests/test_errors.py`
 - `app/memory/reader.py`
 - `app/memory/disabled.py`
 - `app/memory/observability.py`
@@ -963,8 +1038,11 @@ Manager 更新；Worker 不在审批前修改。
 11. current-only 分别超过 char 上限、UTF-8 byte 上限或两者时均 skipped，current input 不被
     截断/修改，Provider 调用数为 0，reason 为 `current_input_exceeds_semantic_budget`。
 12. 相同输入与 budget version 重复构造得到 byte-for-byte 相同 query、strategy、长度和 reason。
-13. role 不改变 v0.1 query 文本；construction version 与 budget version 固定。
-14. query/request/context 的 `repr` 不包含正文或 vector。
+13. canonical loader 返回 v1 固定 tuple；同一 v1 分别修改四个阈值中的任意一个都在
+    `__post_init__` 以 `CONFIG_INVALID/semantic_query_budget_definition_mismatch` 失败，未知 version
+    也失败。CLI、FastAPI、workflow 不能注入同版本不同值。
+14. role 不改变 v0.1 query 文本；construction version 与 budget version 固定。
+15. query/request/context 的 `repr` 不包含正文或 vector。
 
 ### 18.2 Coordinator 单元测试
 
@@ -980,19 +1058,32 @@ Manager 更新；Worker 不在审批前修改。
 8. timeout/rate-limit/unavailable 各返回稳定 failed context，允许本轮 consumer fallback，下一轮
    重新调用 Provider。
 9. config/secret/dependency/auth/qualification 在 lazy 首次调用出现时均标记 unhealthy 并重新
-   抛出；第二轮得到 `semantic_coordinator_unhealthy` 且不再触碰 Provider。
+   抛出；第二轮严格抛 `SemanticCoordinatorUnhealthyError`，code 为
+   `SEMANTIC_COORDINATOR_UNHEALTHY`、retryable=false，且不再触碰 Provider。
 10. invalid input/request rejected 重新抛出但不标记 Provider unhealthy；下一条合法请求可成功。
 11. 未知编程异常继续抛出，不被误当作可降级 Provider failure。
 12. 连续两轮相同 query 仍各调用一次 Provider，证明没有跨轮 cache。
 13. 两个并发 turn 在首次 lazy load 时只初始化一次；Provider 最大并发 embed 数为 1，两个
-    context 的 request key、统计、reason 和向量分别对应各自输入，不串数据。
+    context 的 request key、统计、reason 和向量分别对应各自输入，不串数据。测试使用
+    `threading.Barrier` / `threading.Event` 控制进入与释放，不用 `sleep` 猜测时序。
 14. Coordinator query 与 Memory document embedding 并发时也经同一 wrapper 串行，不绕过锁。
 15. `safe_summary()` 的 duration、dependency count、strategy、budget version、char/byte count、
     provider_called 可由 context 字段直接得到；deduplicated count 派生正确。
 16. safe summary/App Log 只包含 allowlist，敏感哨兵、正文、hash、token 和 vector 均不出现。
 17. 本地 BGE query guard 对 tokenizer 实际长度超限 fail loud，不以 `truncation=True` 继续；
-    合法 query 以无截断全文推理。SiliconFlow fake client 收到与 builder 输出 byte-for-byte 相同的
-    有界全文。
+    `EmbeddingInvalidInputError` 原样传播；合法 query 只 tokenize 一次并复用 encoded tensors
+    推理，向量与同一合法输入的原计算等价。document 仍断言
+    `truncation=True/max_length=8192`，并与修改前固定向量基线一致。SiliconFlow fake client 收到与
+    builder 输出 byte-for-byte 相同的有界全文。
+18. unhealthy state 只保存固定 reason 和 cause `ErrorCode`；用对象图/哨兵断言不保留原始异常、
+    message、traceback、request ID、Provider response 或 credential，后续异常 metadata 也只含
+    allowlist。
+19. synchronized wrapper 成功时返回 delegate 的同一 result identity，失败时抛同一 exception
+    identity；diagnostics/retry/request ID 不变。异常后用 Event 驱动第二个调用成功进入，证明锁已
+    释放。
+20. Observable 在 wrapper 内层时，每个逻辑调用仍恰好一个 completed 或 failed terminal event，
+    没有 wrapper 重复事件；可控 clock/Event 证明 Foundation duration 不含锁等待、Semantic
+    duration 包含锁等待。
 
 ### 18.3 Memory 集成测试
 
@@ -1032,9 +1123,10 @@ Manager 更新；Worker 不在审批前修改。
 3. Controller adapter 只把 user/assistant 转成 `SemanticMessage`，system/tool/未知 role 不进入
    builder；正文相同但 ID 不同的 user/assistant 历史仍保留。
 4. 默认长期 Memory 关闭路径不创建 Provider，CLI/API 行为保持不变。
-5. 长期 Memory 开启路径每个 runtime 只创建一个 raw Provider、一个 synchronized wrapper 和
-   一个 Coordinator；不同 runtime 实例互不
-   共享。
+5. 长期 Memory 开启路径每个 runtime 只通过公开 Factory 创建 Observable Provider，再创建一个
+   synchronized wrapper；Coordinator、Memory Reader、Memory Extraction 的 provider/source
+   delegate 通过对象 identity 断言为该同一 wrapper。不同 runtime/composition root 实例互不共享，
+   测试禁止调用或 monkeypatch 私有 `_create_provider()` 作为接线捷径。
 6. 可提前发现的永久错误使 CLI/FastAPI composition fail fast；lazy 永久错误使当前 turn 失败
    且 runtime unhealthy，无 Hash/Disabled/keyword 静默降级。
 7. 单轮 timeout/rate-limit/unavailable 时 turn 仍可通过 Memory keyword + World Info + static
@@ -1049,6 +1141,7 @@ Manager 更新；Worker 不在审批前修改。
 
 ```text
 pytest -q tests/test_semantic_query.py tests/test_semantic_query_integration.py
+pytest -q tests/test_errors.py
 pytest -q tests/embeddings/test_synchronized.py tests/embeddings/test_local_bge.py tests/embeddings/test_siliconflow.py
 pytest -q tests/test_memory_canonical_integration.py tests/test_world_info_evidence_provider.py
 pytest -q tests/test_rag_generation_runtime.py tests/test_character_manifest.py
@@ -1088,13 +1181,12 @@ git diff --check
 - 后续独立 `CharacterExampleSelectorPort` 的方向；
 - 本任务不修改当前静态样例内容、顺序、context tags 和 Character rules。
 
-### Embedding Foundation Worker 必须复核
+### Embedding Foundation Worker 实施前门禁复核（已通过）
 
-- `SemanticQueryBudget` 数值是否与已批准 Profile 的可接受输入范围一致；
 - `SynchronizedEmbeddingProvider` 的 wrapper 生命周期、锁覆盖范围及 query/document 共用；
 - `LocalBgeM3Provider` query 路径的 fail-loud tokenizer guard，确保不再静默截断；
-- permanent/transient/request/contract error matrix 与现有 error code、retryable 语义一致；
-- batch result validation、只读 vector 和 exact signature 不被 wrapper 改变。
+- 两处均不得改变 Profile 门禁、signature、batch result validation、只读 vector，也不得增加
+  隐式 Hash fallback。此复核通过前不开始 T-0135 实施。
 
 ### Observability owner 必须复核
 
@@ -1103,7 +1195,10 @@ git diff --check
 - 独立 follow-up：全局 `SafeTraceLogger` adapter。该 follow-up 未批准前，本任务不宣称 Trace
   写入失败安全，也不在 semantic event 局部吞错。
 
-## 20. Manager review disposition 与待复审项
+Memory、RAG、Character、Observability 的上述复核均在 Semantic Worker 完成代码交付后进行；
+它们不是实施前门禁。
+
+## 20. Manager review disposition 与实施门禁
 
 ### 20.1 已批准方向
 
@@ -1114,7 +1209,10 @@ git diff --check
 - 不修改 Character Port，不接入 managed vector RAG，不改变 World Info；
 - 不增加总开关、不使用 LLM rewrite、不做跨轮 cache；
 - 暂时接受“存在 active role 时每个非空 turn 生成一次向量”，前提是先落实 query budget，
-  并用 produced/consumed 安全日志观察实际浪费率。
+  并用 produced/consumed 安全日志观察实际浪费率；
+- 批准当前 budget 数值、current-input fail-closed、本地 BGE query fail-loud guard；
+- 批准五类错误矩阵、permanent/contract unhealthy 和 correctness-first 串行 wrapper；
+- 批准 `memory.semantic_query_usage` 口径，并把全局 Safe Trace 留作独立 follow-up。
 
 ### 20.2 Changes Requested 已修订
 
@@ -1132,18 +1230,26 @@ git diff --check
 6. 明确 Controller adapter 过滤 system/tool/未知 role，builder 只接收 typed user/assistant，
    并让测试职责与 schema 一致。
 
-### 20.3 待 Manager 复审确认
+### 20.3 带条件批准的两个实现验收条件
 
-1. 是否批准上述 `SemanticQueryBudget` 数值、current-input fail-closed 策略和本地 BGE query
-   fail-loud token guard；该 guard 需要 Embedding Foundation Worker 复核。
-2. 是否批准第 13.2 节错误分类矩阵，特别是 permanent/contract 错误使 runtime unhealthy，
-   current turn 不允许 keyword 静默降级。
-3. 是否批准 correctness-first 的进程内串行 wrapper；在 Foundation 提供并发能力契约前不允许
-   直接共享 raw Provider 并发调用。
-4. 是否批准新增 Memory usage App Log 来观察向量浪费率；该日志和 Memory 调用点需要 Memory /
-   Observability owner 复核。
-5. 是否同意把全局 Trace 写入安全作为独立 Observability follow-up，而不是扩大 T-0135 或在
-   semantic event 上做局部异常吞噬。
+1. Budget 身份不可篡改：canonical loader + strict `__post_init__` 保证
+   `semantic-query-budget/v1` 只能对应 `(1024, 3072, 4096, 8000)`；同版本修改任一阈值或使用
+   未知 version 均 fail fast，并有逐字段测试。
+2. unhealthy 后续异常固定：只抛 `SemanticCoordinatorUnhealthyError`，ErrorCode 固定为
+   `SEMANTIC_COORDINATOR_UNHEALTHY`；Coordinator state 只能保存
+   `semantic_coordinator_unhealthy` 和原稳定 `ErrorCode`，不得保存原始异常对象或正文。
 
-Manager 审批前，Worker 不实施上述代码、不更新 Manager-owned 架构/接口/任务文档，也不接入
-managed vector RAG。
+### 20.4 实施门禁
+
+Foundation 只读复核完成前的冻结状态为：
+
+```text
+design_approved
+implementation_blocked_on_embedding_foundation_review
+```
+
+Embedding Foundation Worker 已完成 `app/embeddings/providers/local_bge_m3.py` query fail-loud guard
+与新增 `SynchronizedEmbeddingProvider` 的只读复核，并批准本节补充的 wrapper 顺序、实例边界、
+duration 口径和测试门禁。因此实施阻塞解除，Semantic Worker 可以开始 T-0135。Memory、
+Observability、RAG、Character 在代码交付后分别复核自己的接口边界；实施仍不得接入 managed
+vector RAG。

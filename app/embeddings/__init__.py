@@ -27,6 +27,7 @@ from app.embeddings.schemas import (
     EmbeddingUsage,
     ResolvedQueryEmbedding,
 )
+from app.embeddings.synchronized import SynchronizedEmbeddingProvider
 
 __all__ = [
     "EmbeddingBatchResult",
@@ -43,6 +44,7 @@ __all__ = [
     "EmbeddingSpaceProfile",
     "EmbeddingUsage",
     "ResolvedQueryEmbedding",
+    "SynchronizedEmbeddingProvider",
     "DirectQueryEmbeddingSource",
     "create_embedding_provider",
     "canonical_content_hash",

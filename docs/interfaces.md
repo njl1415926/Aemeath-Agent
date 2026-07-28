@@ -301,6 +301,7 @@ class AgentTurnOutput:
 `DialogueController` 是编排者，只依赖以下 ports：
 
 - `CharacterProviderPort`
+- `SemanticQueryCoordinatorPort`
 - `EvidenceProviderPort`
 - `MemoryReaderPort`
 - `MemoryWriterPort`
@@ -522,6 +523,7 @@ class EvidenceProviderPort(Protocol):
         character_id: str,
         query: str,
         metadata: dict[str, Any] | None = None,
+        semantic_context: TurnSemanticContext | None = None,
     ) -> EvidencePack:
         ...
 ```
@@ -539,6 +541,10 @@ class EvidenceProviderPort(Protocol):
 - `WorldInfoEvidenceProvider`，当前主运行时 active provider
 
 `EmptyEvidenceProvider` 仅用于测试或显式关闭外部证据的运行方式，不再是 `app/main.py` 的默认 provider。
+
+`semantic_context` 是可选的 turn-local 优化输入。现有关键词 Provider 可以忽略它；未来
+canonical vector Provider 应消费其中已经解析好的 exact-signature query embedding，而不是再次
+请求 Embedding Provider。
 
 ### RetrievalResult
 
@@ -849,8 +855,9 @@ not over-redact ordinary field names such as `ordinary-key`.
   `AEMEATH_MEMORY_WINDOW_SIZE` 条未处理消息时写入 `window` job。
 - `MemoryExtractionService` 使用 `ChatModelClient` 输出 JSON memories，先通过
   `create_or_get_exact_active_memory(...)` 提交事实，再批量写 canonical document artifacts。
-- `MemoryReader` 通过 provider-neutral `QueryEmbeddingSourcePort` 每轮主动查询 exact
-  signature artifact，返回
+- `MemoryReader` 优先使用共享 turn 的 `TurnSemanticContext` 查询 exact-signature artifact，
+  不会在同一对话 turn 再调用一次 Provider。未传 context 的独立调用保留 provider-neutral
+  `QueryEmbeddingSourcePort` 一个兼容版本，返回
   `MemorySearchResult(match_reason="embedding_similarity")`。
 - coverage 不完整时 vector 结果优先、keyword 只补位，不比较两种分数；query embedding
   失败或无有效向量命中时执行 keyword fallback，显式中文回忆保留 active-memory fallback。
@@ -946,9 +953,10 @@ schedule repair, retry, fallback, or rebuild work.
 must apply to both returned hits and aggregate diagnostics.
 
 `QueryEmbeddingSourcePort.resolve(...)` returns provider-neutral
-`ResolvedQueryEmbedding(signature, vector)`. The first implementation is
-`DirectQueryEmbeddingSource`, which makes one batch-first `query` request. A later shared-turn
-implementation may consume `TurnSemanticContext` without changing `MemoryReader`.
+`ResolvedQueryEmbedding(signature, vector)`. `DirectQueryEmbeddingSource` remains the compatibility
+implementation for calls outside the dialogue turn. The normal enabled Memory dialogue path now
+receives `ResolvedQueryEmbedding` through `TurnSemanticContext` and does not make a second query
+request.
 
 `MemoryExtractionResult` and persisted job results distinguish
 `created_memory_ids`, `existing_memory_ids`, `artifact_written_memory_ids`, and
@@ -958,6 +966,54 @@ gap pages; pending is derived and does not add another persistence table.
 These additions must not expose vectors or provider details to `DialogueController`.
 - 当前自动提炼仍创建 `user_global` memory。`character` / `session` scope 已具备存储和召回
   契约，未来 scope classifier 另行设计。
+
+## Semantic Query Interfaces
+
+位置：
+
+- `app/semantic/schemas.py`
+- `app/semantic/ports.py`
+- `app/semantic/query_builder.py`
+- `app/semantic/coordinator.py`
+
+`SemanticQueryCoordinatorPort` 是本轮语义查询的唯一入口：
+
+```python
+class SemanticQueryCoordinatorPort(Protocol):
+    def prepare_turn_context(
+        self,
+        *,
+        turn_input: SemanticTurnInput,
+    ) -> TurnSemanticContext:
+        ...
+```
+
+`SemanticTurnInput` 携带当前输入以及最近的 `user` / `assistant` 消息。Controller 创建该 DTO
+前按 message id 排除本轮已保存的当前消息；system、tool 和未知 role 不进入 query builder。
+
+`TurnSemanticContext` 为以下具名 role 各保存一个 resolution：
+
+- `memory_recall`
+- `canonical_lore`
+- `canonical_voice`
+- `character_examples`
+
+每个 resolution 的状态是 `not_requested`、`skipped`、`ready` 或 `failed`。ready resolution
+持有 provider-neutral `ResolvedQueryEmbedding`；context 不提供 query/vector 序列化，也不跨 turn
+持久化。`safe_summary()` 只包含状态、reason code、计数、耗时、provider/profile 标识和
+signature fingerprint。
+
+v0.1 Coordinator 使用版本化确定性查询预算，对相同 role query 去重，并在一轮内提交一次
+batch-first `purpose="query"` 请求。永久配置、qualification、signature 或结果契约错误会将
+Coordinator 标为 unhealthy，直到 runtime 重建；timeout、rate limit 和 provider unavailable
+只降级当前 turn；invalid input 保持原 typed request error，不映射为 unavailable。
+
+当前 runtime 激活范围：
+
+- 仅在长期 Memory 启用时激活 `memory_recall`。
+- World Info 接收但忽略 context，保持关键词行为。
+- canonical RAG 和 Character example role 尚未激活。
+- 本接口不包含跨轮 embedding cache 或 Persistence schema。
 
 ## Observability Interfaces
 
@@ -1133,8 +1189,11 @@ build_evidence_pack(
     character_id: str,
     query: str,
     metadata: dict | None = None,
+    semantic_context: TurnSemanticContext | None = None,
 ) -> EvidencePack
 ```
+
+T-0135 added `semantic_context` as a backward-compatible optional parameter; World Info ignores it.
 
 - World Info results are returned as `EvidencePack.lore_results`.
 - `voice_results` remains empty for the World Info provider.

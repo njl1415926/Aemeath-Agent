@@ -12,6 +12,7 @@ from app.auth.errors import (
 from app.errors import ErrorCode, http_status_for_error, map_exception, redact_sensitive
 from app.memory.extractor import MemoryExtractionError
 from app.permissions.errors import PermissionDeniedError
+from app.semantic.errors import SemanticCoordinatorUnhealthyError
 from app.session.errors import (
     SessionArchivedError,
     SessionEndedError,
@@ -121,3 +122,19 @@ def test_redact_sensitive_handles_nested_values_and_text():
     assert redacted["metadata"]["header"] == "x-api-key=[redacted] should not leak"
     assert redacted["metadata"]["safe"] == "visible"
     assert redacted["metadata"]["ordinary-key"] == "not sensitive"
+
+
+def test_semantic_unhealthy_error_has_stable_code_and_http_status() -> None:
+    exc = SemanticCoordinatorUnhealthyError(
+        cause_error_code=ErrorCode.EMBEDDING_AUTH_FAILED
+    )
+
+    error_info = map_exception(exc)
+
+    assert error_info.code == ErrorCode.SEMANTIC_COORDINATOR_UNHEALTHY
+    assert error_info.retryable is False
+    assert http_status_for_error(error_info) == 500
+    assert error_info.metadata == {
+        "reason_code": "semantic_coordinator_unhealthy",
+        "cause_error_code": "EMBEDDING_AUTH_FAILED",
+    }

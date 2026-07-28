@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from app.memory.schemas import MemoryQuery, MemorySearchResult
 from app.schemas import MemoryDecision, MemoryRecord
+from app.semantic.schemas import TurnSemanticContext
 
 
 class DisabledMemoryReader:
-    def retrieve_query(self, *, memory_query: MemoryQuery) -> list[MemorySearchResult]:
+    def retrieve_query(
+        self,
+        *,
+        memory_query: MemoryQuery,
+        semantic_context: TurnSemanticContext | None = None,
+    ) -> list[MemorySearchResult]:
         return []
 
     def retrieve(self, *, user_id: str, query: str, limit: int = 8) -> list[MemoryRecord]:

@@ -106,3 +106,21 @@ def test_network_and_local_bge_profiles_remain_unqualified_review_only(
     with pytest.raises(EmbeddingConfigurationError) as exc_info:
         load_embedding_space_profile(profile_id)
     assert exc_info.value.reason == "profile_not_approved"
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    ("siliconflow_pro_bge_m3_v1", "local_bge_m3_v1"),
+)
+def test_bge_canary_artifact_has_canonical_text_format(profile_id: str) -> None:
+    profile = load_profile_for_qualification(profile_id)
+    raw = read_profile_artifact(
+        profile.canary_artifact,
+        profile.canary_artifact_sha256,
+        allowed_root="canaries",
+    )
+
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert b"\r" not in raw
+    assert raw.endswith(b"\n")
+    assert not raw.endswith(b"\n\n")

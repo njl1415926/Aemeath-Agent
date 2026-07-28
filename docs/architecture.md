@@ -10,6 +10,7 @@ CLI / FastAPI
   -> SessionStorePort
   -> DialogueController
        -> CharacterProviderPort
+       -> SemanticQueryCoordinatorPort
        -> MemoryReaderPort / MemoryWriterPort
        -> EvidenceProviderPort
        -> ContextBuilderPort
@@ -60,6 +61,39 @@ exact-signature gaps. The single Memory Worker repairs bounded gap pages on an i
 with failure backoff. Other signatures remain valid coexisting spaces. The active dialogue RAG
 provider remains `WorldInfoEvidenceProvider`, so this Memory integration does not change the RAG
 runtime path.
+
+## 2026-07-28 Shared Turn Semantic Query
+
+T-0135 adds a non-persistent semantic-query coordination layer between recent-message loading and
+the independently owned Memory / Evidence consumers:
+
+```text
+DialogueController
+  -> save current user message
+  -> load recent user/assistant messages, excluding the current message by id
+  -> SemanticQueryCoordinatorPort.prepare_turn_context(...)
+       -> deterministic query construction and budget
+       -> one batch-first purpose=query embedding call for active roles
+       -> immutable TurnSemanticContext
+  -> MemoryReaderPort.retrieve_query(..., semantic_context=...)
+  -> EvidenceProviderPort.build_evidence_pack(..., semantic_context=...)
+```
+
+`DialogueController` only adapts inputs, invokes the coordinator once, and passes the same context
+instance onward. Query rewriting, dependency-message selection, embedding validation, and consumer
+fallback remain inside the semantic and consumer modules. Query text and vectors are turn-local and
+must not be persisted in `PromptContext.metadata`, trace payloads, prompt-run metadata, or app logs.
+
+The enabled long-term-memory runtime shares one
+`SynchronizedEmbeddingProvider(ObservableEmbeddingProvider(concrete_provider))` across the semantic
+coordinator, Memory reader compatibility source, and Memory extraction. The synchronized wrapper
+serializes the complete provider call without changing provider batches, retries, results, errors, or
+terminal embedding events. Local BGE query input is tokenized without truncation and fails loudly on
+token overflow; document embedding keeps its existing truncating behavior.
+
+The current composition root activates only the `memory_recall` semantic role. World Info receives
+the optional context but intentionally ignores it, Character example selection is unchanged, and
+managed canonical RAG remains tooling-only until a separately approved runtime integration task.
 
 ## 2026-06-08 Manager Update: Session Contract v0.1
 
@@ -135,18 +169,20 @@ DialogueController
 
 ## 当前运行基线
 
-v0.3 已跑通一个最小但可扩展的角色对话闭环：
+v0.3 及其当前开发 checkpoint 已跑通一个最小但可扩展的角色对话闭环：
 
 1. CLI 接收用户输入。
 2. Dialogue Controller 编排一次 turn。
 3. Character Provider 提供爱弥斯角色上下文。
 4. Message Store 读取短期上下文并写入对话日志。
-5. Memory Reader 检索长期记忆。
-6. Context Builder 组装 prompt。
-7. Model Client 生成回复。
-8. State Updater 更新关系 / 情绪状态。
-9. Memory Writer 按配置提交长期记忆提炼任务。
-10. Session Store 验证会话归属、状态并提供消息统计。
+5. Semantic Query Coordinator 为已激活消费者构造并共享本轮查询向量。
+6. Memory Reader 检索长期记忆。
+7. Evidence Provider 检索剧情 / 世界信息证据。
+8. Context Builder 组装 prompt。
+9. Model Client 生成回复。
+10. State Updater 更新关系 / 情绪状态。
+11. Memory Writer 按配置提交长期记忆提炼任务。
+12. Session Store 验证会话归属、状态并提供消息统计。
 
 ## 高层数据流
 
@@ -164,6 +200,7 @@ DialogueController
   |-- CharacterProvider
   |-- MessageStore
   |-- RelationshipStore
+  |-- SemanticQueryCoordinator
   |-- MemoryReader
   |-- EvidenceProvider
   |-- ContextBuilder -> PromptContext -> PromptCompiler
@@ -456,8 +493,9 @@ v0.3 long-term memory runtime 在显式开启 `AEMEATH_ENABLE_LONG_TERM_MEMORY=t
   `MemoryExtractionService` 使用 DeepSeek / mock extraction client 提炼 JSON memories。
 - 提炼出的 Memory 事实先原子写入 `long_term_memories`，再批量写入 exact-signature
   `long_term_memory_embedding_artifacts`；artifact 失败不回滚事实，由 repair 补齐。
-- `MemoryReader` 在每轮对话中通过 provider-neutral query source 主动检索 exact-signature
-  canonical artifact，coverage 不完整时使用关键词补位，结果进入
+- `MemoryReader` 优先使用同一 turn 的 `TurnSemanticContext` 检索 exact-signature canonical
+  artifact；未传共享 context 的独立管理/兼容调用仍可使用 provider-neutral direct query source。
+  coverage 不完整时使用关键词补位，结果进入
   `ContextBuilder.long_term_memories` 和 prompt run log 的 `memory_ids`。
 - 独立 Worker 按 bounded batch、独立 interval 和失败退避修复当前 signature 的 artifact
   缺口；其他 signature 合法共存，当前版本不提供 extraction job 自动重试。
@@ -604,6 +642,8 @@ app/main.py
   creates WorldInfoEvidenceProvider
   creates NoopTraceLogger
   creates NoopAppLogger / JsonlAppLogger for AgentService
+  creates one synchronized Embedding Provider when long-term Memory is enabled
+  creates SemanticQueryCoordinator / DisabledSemanticQueryCoordinator
   creates MemoryReader/Writer
   creates ResponseGenerator(ChatModelClient)
   injects all dependencies into DialogueController

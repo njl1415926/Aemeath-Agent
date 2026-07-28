@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import numpy as np
 from app.embeddings.errors import (
     EmbeddingConfigurationError,
     EmbeddingDependencyError,
+    EmbeddingInvalidInputError,
     EmbeddingInvalidResponseError,
     EmbeddingUnavailableError,
 )
@@ -99,20 +101,30 @@ class BgeM3EmbeddingProvider(BaseEmbeddingProvider):
         try:
             for start in range(0, len(request.texts), self.batch_size):
                 batch = list(request.texts[start:start + self.batch_size])
-                encoded = tokenizer(
-                    batch,
-                    padding=True,
-                    truncation=True,
-                    max_length=self.max_length,
-                    return_tensors="pt",
-                )
+                if request.purpose == "query":
+                    encoded = tokenizer(
+                        batch,
+                        padding=True,
+                        truncation=False,
+                        max_length=self.max_length,
+                        return_tensors="pt",
+                    )
+                    self._validate_query_token_length(encoded)
+                else:
+                    encoded = tokenizer(
+                        batch,
+                        padding=True,
+                        truncation=True,
+                        max_length=self.max_length,
+                        return_tensors="pt",
+                    )
                 encoded = {key: value.to(model.device) for key, value in encoded.items()}
                 with torch.no_grad():
                     output = model(**encoded)
                 cls_embeddings = output.last_hidden_state[:, 0]
                 array = cls_embeddings.detach().cpu().numpy()
                 raw_batches.append(np.asarray(array))
-        except EmbeddingInvalidResponseError:
+        except (EmbeddingInvalidInputError, EmbeddingInvalidResponseError):
             raise
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise EmbeddingInvalidResponseError("local_model_output_invalid") from exc
@@ -134,6 +146,19 @@ class BgeM3EmbeddingProvider(BaseEmbeddingProvider):
             usage=EmbeddingUsage(input_count=len(request.texts), input_tokens=None),
             diagnostics=EmbeddingCallDiagnostics(),
         )
+
+    def _validate_query_token_length(self, encoded: object) -> None:
+        if not isinstance(encoded, Mapping) or "input_ids" not in encoded:
+            raise EmbeddingInvalidResponseError("local_tokenizer_output_invalid")
+        shape = getattr(encoded["input_ids"], "shape", None)
+        if shape is None or len(shape) != 2:
+            raise EmbeddingInvalidResponseError("local_tokenizer_output_invalid")
+        try:
+            token_count = int(shape[1])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise EmbeddingInvalidResponseError("local_tokenizer_output_invalid") from exc
+        if token_count > self.max_length:
+            raise EmbeddingInvalidInputError("query_token_limit_exceeded")
 
     def _load(self):
         if self._tokenizer is not None and self._model is not None and self._torch is not None:

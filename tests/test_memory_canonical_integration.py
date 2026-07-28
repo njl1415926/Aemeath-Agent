@@ -26,6 +26,7 @@ from app.memory.schemas import MemoryArtifactEligibility, MemoryQuery
 from app.memory.worker import MemoryRepairSchedule
 from app.observability.schemas import AppLogRecord
 from app.schemas import MessageRecord
+from app.semantic.coordinator import SemanticQueryCoordinator
 
 
 class RecordingLogger:
@@ -590,3 +591,130 @@ def test_memory_event_allowlist_drops_sensitive_fields() -> None:
         "provider": "deterministic_hash",
         "created_memory_count": 1,
     }
+
+
+def test_reader_prefers_shared_semantic_vector_without_direct_provider_call(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "reader_shared_semantic.db")
+    provider = RecordingEmbeddingProvider()
+    logger = RecordingLogger()
+    content = "用户喜欢安静的咖啡馆"
+    memory_id = _create_memory(store, content=content)
+    _write_artifact(store, provider, memory_id=memory_id, content=content)
+    coordinator = SemanticQueryCoordinator(
+        provider=provider,
+        active_roles=("memory_recall",),
+    )
+    context = coordinator.prepare_turn_context(
+        turn_input=_semantic_turn(content, turn_id="turn_shared")
+    )
+    provider.requests.clear()
+    reader = MemoryReader(
+        store,
+        embedding_provider=provider,
+        recall_threshold=0.99,
+        app_logger=logger,
+    )
+
+    results = reader.retrieve_query(
+        memory_query=MemoryQuery(
+            user_id="user_1",
+            character_id="aemeath",
+            session_id="session_1",
+            query_text=content,
+            limit=1,
+        ),
+        semantic_context=context,
+    )
+
+    assert [result.record.id for result in results] == [memory_id]
+    assert provider.requests == []
+    usage = next(
+        record for record in logger.records if record.event_name == "memory.semantic_query_usage"
+    )
+    assert usage.turn_id == "turn_shared"
+    assert usage.payload == {
+        "semantic_role": "memory_recall",
+        "semantic_vector_consumed": True,
+        "semantic_usage_reason": "vector_search_attempted",
+    }
+
+
+def test_reader_records_ready_vector_as_unused_for_low_information_input(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "reader_shared_unused.db")
+    provider = RecordingEmbeddingProvider()
+    logger = RecordingLogger()
+    context = SemanticQueryCoordinator(
+        provider=provider,
+        active_roles=("memory_recall",),
+    ).prepare_turn_context(turn_input=_semantic_turn("你好", turn_id="turn_unused"))
+    provider.requests.clear()
+    reader = MemoryReader(store, embedding_provider=provider, app_logger=logger)
+
+    results = reader.retrieve_query(
+        memory_query=MemoryQuery(
+            user_id="user_1",
+            character_id="aemeath",
+            session_id="session_1",
+            query_text="你好",
+        ),
+        semantic_context=context,
+    )
+
+    assert results == []
+    assert provider.requests == []
+    assert logger.records[-1].event_name == "memory.semantic_query_usage"
+    assert logger.records[-1].turn_id == "turn_unused"
+    assert logger.records[-1].payload["semantic_vector_consumed"] is False
+    assert logger.records[-1].payload["semantic_usage_reason"] == "low_information_input"
+
+
+def test_reader_failed_semantic_context_uses_keyword_without_direct_retry(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "reader_shared_failed.db")
+    provider = RecordingEmbeddingProvider(fail_purpose="query")
+    content = "semantic fallback topic"
+    memory_id = _create_memory(store, content=content)
+    context = SemanticQueryCoordinator(
+        provider=provider,
+        active_roles=("memory_recall",),
+    ).prepare_turn_context(turn_input=_semantic_turn(content, turn_id="turn_failed"))
+    assert context.status == "failed"
+    provider.requests.clear()
+    logger = RecordingLogger()
+    reader = MemoryReader(store, embedding_provider=provider, app_logger=logger)
+
+    results = reader.retrieve_query(
+        memory_query=MemoryQuery(
+            user_id="user_1",
+            character_id="aemeath",
+            session_id="session_1",
+            query_text=content,
+            limit=1,
+        ),
+        semantic_context=context,
+    )
+
+    assert [result.record.id for result in results] == [memory_id]
+    assert provider.requests == []
+    assert all(
+        record.event_name != "memory.semantic_query_usage" for record in logger.records
+    )
+
+
+def _semantic_turn(query: str, *, turn_id: str):
+    from app.semantic.schemas import SemanticTurnInput
+
+    return SemanticTurnInput(
+        turn_id=turn_id,
+        user_id="user_1",
+        session_id="session_1",
+        character_id="aemeath",
+        current_user_message_id="message_current",
+        current_input=query,
+        recent_messages=(),
+    )

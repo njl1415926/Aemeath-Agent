@@ -6,6 +6,7 @@ from typing import Any
 from app.retrieval.ports import RetrieverPort
 from app.retrieval.schemas import EvidencePack, RetrievalResult
 from app.retrieval.world_info import WorldInfoKeywordRetriever
+from app.semantic.schemas import TurnSemanticContext
 
 WORLD_INFO_BASE_LORE_UID = 86
 WORLD_INFO_BASE_LORE_TRIGGER_UIDS = frozenset(
@@ -184,6 +185,7 @@ class EmptyEvidenceProvider:
         query: str,
         metadata: dict[str, Any] | None = None,
         response_mode: str | None = None,
+        semantic_context: TurnSemanticContext | None = None,
     ) -> EvidencePack:
         return EvidencePack()
 
@@ -206,6 +208,7 @@ class CompositeEvidenceProvider:
         query: str,
         metadata: dict[str, Any] | None = None,
         response_mode: str | None = None,
+        semantic_context: TurnSemanticContext | None = None,
     ) -> EvidencePack:
         lore_results = []
         voice_results = []
@@ -256,6 +259,7 @@ class WorldInfoEvidenceProvider:
         query: str,
         metadata: dict[str, Any] | None = None,
         response_mode: str | None = None,
+        semantic_context: TurnSemanticContext | None = None,
     ) -> EvidencePack:
         retrieval_metadata = {
             "character_id": character_id,
@@ -475,6 +479,7 @@ class WuwaRagEvidenceProvider:
         query: str,
         metadata: dict[str, Any] | None = None,
         response_mode: str | None = None,
+        semantic_context: TurnSemanticContext | None = None,
     ) -> EvidencePack:
         plan = self._decide_plan(
             query=query,

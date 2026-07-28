@@ -1,0 +1,4 @@
+# Embedding profile resources are byte-addressed and must remain stable across OSes.
+app/embeddings/profiles/*.json text eol=lf
+app/embeddings/profiles/canaries/*.json text eol=lf
+app/embeddings/profiles/baselines/*.f32le binary

@@ -22,6 +22,9 @@ _SAFE_PAYLOAD_FIELDS = {
     "provider",
     "repair_delay_seconds",
     "scanned_memory_count",
+    "semantic_role",
+    "semantic_usage_reason",
+    "semantic_vector_consumed",
     "trigger_type",
     "vector_result_count",
 }
@@ -37,6 +40,7 @@ def record_memory_event(
     user_id: str | None = None,
     session_id: str | None = None,
     character_id: str | None = None,
+    turn_id: str | None = None,
 ) -> None:
     """Record a content-free Memory summary without affecting business outcomes."""
 
@@ -52,6 +56,7 @@ def record_memory_event(
                 user_id=user_id,
                 session_id=session_id,
                 character_id=character_id,
+                turn_id=turn_id,
                 error_code=error_code,
             )
         )

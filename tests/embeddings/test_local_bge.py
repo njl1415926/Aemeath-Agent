@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from app.embeddings.errors import EmbeddingInvalidResponseError
+from app.embeddings.errors import EmbeddingInvalidInputError, EmbeddingInvalidResponseError
 from app.embeddings.providers.local_bge_m3 import BgeM3EmbeddingProvider
 from app.embeddings.schemas import EmbeddingRequest
 
@@ -21,6 +21,10 @@ class _FakeTensor:
     def to(self, device: str) -> _FakeTensor:
         self.moves.append(device)
         return self
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.value.shape
 
     def __getitem__(self, key: object) -> _FakeTensor:
         return _FakeTensor(self.value[key])
@@ -65,9 +69,10 @@ class _FakeTorch:
 
 
 class _FakeTokenizer:
-    def __init__(self):
+    def __init__(self, *, sequence_length: int = 2):
         self.calls: list[dict[str, Any]] = []
         self.encoded_tensors: list[_FakeTensor] = []
+        self.sequence_length = sequence_length
 
     def __call__(
         self,
@@ -88,7 +93,12 @@ class _FakeTokenizer:
             }
         )
         ids = [int(text.rsplit("-", 1)[-1]) for text in texts]
-        tensor = _FakeTensor(ids)
+        effective_length = (
+            min(self.sequence_length, max_length) if truncation else self.sequence_length
+        )
+        values = np.zeros((len(ids), effective_length), dtype=np.int64)
+        values[:, 0] = ids
+        tensor = _FakeTensor(values)
         self.encoded_tensors.append(tensor)
         return {"input_ids": tensor}
 
@@ -98,10 +108,12 @@ class _FakeModel:
         self.device = "fake-device"
         self.output_kind = output_kind
         self.call_count = 0
+        self.seen_input_ids: list[_FakeTensor] = []
 
     def __call__(self, *, input_ids: _FakeTensor):
         self.call_count += 1
-        ids = input_ids.value.astype(int).tolist()
+        self.seen_input_ids.append(input_ids)
+        ids = input_ids.value[:, 0].astype(int).tolist()
         dimension = 1023 if self.output_kind == "wrong_dimension" else 1024
         hidden = np.zeros((len(ids), 2, dimension), dtype=np.float64)
         if self.output_kind == "valid":
@@ -121,8 +133,9 @@ def _install_fake_load(
     provider: BgeM3EmbeddingProvider,
     *,
     output_kind: str = "valid",
+    sequence_length: int = 2,
 ) -> tuple[_FakeTokenizer, _FakeModel, _FakeTorch]:
-    tokenizer = _FakeTokenizer()
+    tokenizer = _FakeTokenizer(sequence_length=sequence_length)
     model = _FakeModel(output_kind=output_kind)
     torch = _FakeTorch()
     provider._load = lambda: (tokenizer, model, torch)  # type: ignore[method-assign]
@@ -143,7 +156,9 @@ def test_local_bge_empty_batch_does_not_load_model(tmp_path: Path) -> None:
     assert result.usage is not None and result.usage.input_count == 0
 
 
-def test_local_bge_uses_cls_pooling_internal_batches_and_max_length(tmp_path: Path) -> None:
+def test_local_bge_query_uses_untruncated_encoded_tensors_for_inference(
+    tmp_path: Path,
+) -> None:
     provider = BgeM3EmbeddingProvider(
         model_path=tmp_path / "model",
         batch_size=2,
@@ -173,13 +188,14 @@ def test_local_bge_uses_cls_pooling_internal_batches_and_max_length(tmp_path: Pa
         }
         == {
             "padding": True,
-            "truncation": True,
+            "truncation": False,
             "max_length": 77,
             "return_tensors": "pt",
         }
         for call in tokenizer.calls
     )
     assert all(tensor.moves == [model.device] for tensor in tokenizer.encoded_tensors)
+    assert model.seen_input_ids == tokenizer.encoded_tensors
     assert model.call_count == 3
     assert torch.no_grad_entries == 3
     assert result.vectors.shape == (5, 1024)
@@ -189,6 +205,83 @@ def test_local_bge_uses_cls_pooling_internal_batches_and_max_length(tmp_path: Pa
     np.testing.assert_allclose(result.vectors[:, 100:105], np.zeros((5, 5)))
     np.testing.assert_allclose(np.linalg.norm(result.vectors, axis=1), np.ones(5))
     assert result.usage is not None and result.usage.input_count == 5
+
+
+def test_local_bge_document_keeps_truncation_behavior(tmp_path: Path) -> None:
+    provider = BgeM3EmbeddingProvider(
+        model_path=tmp_path / "model",
+        batch_size=2,
+        max_length=77,
+    )
+    tokenizer, model, _torch = _install_fake_load(provider, sequence_length=100)
+
+    result = provider.embed(
+        EmbeddingRequest(texts=("text-0", "text-1"), purpose="document")
+    )
+
+    assert tokenizer.calls == [
+        {
+            "texts": ("text-0", "text-1"),
+            "padding": True,
+            "truncation": True,
+            "max_length": 77,
+            "return_tensors": "pt",
+        }
+    ]
+    assert tokenizer.encoded_tensors[0].shape == (2, 77)
+    assert model.seen_input_ids == tokenizer.encoded_tensors
+    np.testing.assert_allclose(result.vectors[:, :2], np.eye(2, dtype=np.float32))
+
+
+def test_local_bge_rejects_query_over_actual_token_limit_without_inference(
+    tmp_path: Path,
+) -> None:
+    provider = BgeM3EmbeddingProvider(
+        model_path=tmp_path / "model",
+        max_length=77,
+    )
+    tokenizer, model, _torch = _install_fake_load(provider, sequence_length=78)
+
+    with pytest.raises(EmbeddingInvalidInputError) as raised:
+        provider.embed(EmbeddingRequest(texts=("text-0",), purpose="query"))
+
+    assert raised.value.reason == "query_token_limit_exceeded"
+    assert len(tokenizer.calls) == 1
+    assert tokenizer.calls[0]["truncation"] is False
+    assert tokenizer.encoded_tensors[0].shape == (1, 78)
+    assert model.call_count == 0
+
+
+def test_local_bge_valid_query_matches_document_vector(tmp_path: Path) -> None:
+    query_provider = BgeM3EmbeddingProvider(
+        model_path=tmp_path / "model",
+        max_length=77,
+    )
+    query_tokenizer, query_model, _query_torch = _install_fake_load(
+        query_provider,
+        sequence_length=77,
+    )
+    document_provider = BgeM3EmbeddingProvider(
+        model_path=tmp_path / "model",
+        max_length=77,
+    )
+    document_tokenizer, document_model, _document_torch = _install_fake_load(
+        document_provider,
+        sequence_length=77,
+    )
+
+    query_result = query_provider.embed(
+        EmbeddingRequest(texts=("text-3",), purpose="query")
+    )
+    document_result = document_provider.embed(
+        EmbeddingRequest(texts=("text-3",), purpose="document")
+    )
+
+    assert query_tokenizer.calls[0]["truncation"] is False
+    assert document_tokenizer.calls[0]["truncation"] is True
+    assert query_model.seen_input_ids == query_tokenizer.encoded_tensors
+    assert document_model.seen_input_ids == document_tokenizer.encoded_tensors
+    np.testing.assert_array_equal(query_result.vectors, document_result.vectors)
 
 
 @pytest.mark.parametrize(

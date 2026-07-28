@@ -1826,3 +1826,61 @@ Final Manager acceptance:
 - BGE-M3/SiliconFlow profile approval, production corpus build review, and active
   `EvidenceProviderPort` composition remain separate follow-up gates. The World Info provider stays
   active until those gates are explicitly approved.
+
+### T-0135 Semantic Query Shared Turn Context v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 15: Semantic Query
+- Manager Session for cross-worker review coordination and final acceptance
+
+Goal:
+- Construct one deterministic, non-persistent semantic query per dialogue turn and share its exact
+  resolved embedding with Memory and future RAG / Character consumers.
+- Prevent duplicate query embedding calls while keeping retrieval policy inside each consumer.
+
+Scope:
+- Added `app/semantic/` schemas, versioned query budget, deterministic dependency-message builder,
+  coordinator port, disabled implementation, typed errors, and safe observability.
+- Added `SynchronizedEmbeddingProvider` around the public observable Provider returned by the
+  existing Factory. The complete delegate call, including retry/backoff, is serialized without
+  changing provider batch behavior or terminal events.
+- Added a Local BGE query token guard that uses untruncated tokenizer output and preserves the
+  existing document truncation path.
+- `DialogueController` excludes the current saved message by id, calls the coordinator once, and
+  passes the same immutable `TurnSemanticContext` to Memory and Evidence ports.
+- Memory consumes the shared `memory_recall` vector when ready and does not perform a second query
+  embedding. Failed/skipped contexts preserve keyword and explicit-recall fallback.
+- Evidence providers accept the optional context; active World Info behavior remains unchanged.
+
+Boundary:
+- Only `memory_recall` is active in the current composition root.
+- Managed canonical RAG remains tooling-only; Character example selection remains static.
+- No query/vector persistence, cross-turn cache, Context Budget, Persistence schema, Profile
+  approval, or implicit Hash fallback was added.
+- SiliconFlow and local BGE-M3 profiles remain `review` and require fresh qualification after the
+  canonical canary formatting change.
+
+Cross-worker review:
+- Embedding Foundation accepted the wrapper, Local BGE token guard, exception behavior, and
+  composition order after the canary line-ending issue was resolved.
+- Memory accepted ready-vector consumption, no-second-call behavior, fallbacks, and scope/provenance
+  preservation.
+- RAG accepted the optional Evidence interface and confirmed World Info and managed-generation
+  boundaries remain unchanged.
+- Character accepted that its provider, rules, and static examples remain unchanged.
+- Observability accepted content-free summaries, allowlisted terminal events, and redaction
+  boundaries.
+
+Manager acceptance:
+- Accepted on 2026-07-28 after five cross-worker reviews and final canary governance.
+- `bge_m3_canary_v1.json` is UTF-8 without BOM, uses LF, and has exactly one trailing LF.
+- Both BGE profiles reference the new canonical artifact digest but remain in `review`; older
+  qualification candidates are stale and must not be approved.
+
+Validation:
+- Full suite: 422 passed.
+- `ruff check .`: passed.
+- `python -m compileall -q app tests`: passed.
+- `git diff --check`: passed; Windows checkout reported only expected CRLF conversion warnings.

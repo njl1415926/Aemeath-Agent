@@ -7,6 +7,7 @@ from app.character.schemas import CharacterProfile, CharacterRuntimeContext
 from app.memory.schemas import MemoryQuery, MemorySearchResult
 from app.retrieval.schemas import EvidencePack
 from app.schemas import MemoryDecision, MemoryRecord, MessageRecord, RelationshipState, StateUpdate
+from app.semantic.schemas import TurnSemanticContext
 
 
 class CharacterProviderPort(Protocol):
@@ -24,7 +25,12 @@ class CharacterProviderPort(Protocol):
 
 
 class MemoryReaderPort(Protocol):
-    def retrieve_query(self, *, memory_query: MemoryQuery) -> list[MemorySearchResult]:
+    def retrieve_query(
+        self,
+        *,
+        memory_query: MemoryQuery,
+        semantic_context: TurnSemanticContext | None = None,
+    ) -> list[MemorySearchResult]:
         ...
 
     def retrieve(self, *, user_id: str, query: str, limit: int = 8) -> list[MemoryRecord]:

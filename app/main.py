@@ -9,6 +9,7 @@ from app.auth.service import hash_dev_token
 from app.character.provider import CharacterRegistry
 from app.config import Settings
 from app.db.store_factory import StoreFacade, create_store
+from app.embeddings.synchronized import SynchronizedEmbeddingProvider
 from app.memory.admin import MemoryAdminService
 from app.memory.classifier import MemoryWriteClassifier
 from app.memory.disabled import (
@@ -29,6 +30,8 @@ from app.observability.prompt_run_logger import JsonlPromptRunLogger
 from app.observability.runtime import create_app_logger
 from app.observability.trace_logger import JsonlTraceLogger
 from app.retrieval.provider import WorldInfoEvidenceProvider
+from app.semantic.coordinator import SemanticQueryCoordinator
+from app.semantic.disabled import DisabledSemanticQueryCoordinator
 from app.services.agent_service import AgentService
 from app.state.classifier import StateUpdateClassifier
 
@@ -63,9 +66,11 @@ def build_controller(
 
     memory_extraction_service = None
     if settings.enable_long_term_memory:
-        memory_embedding_provider = build_memory_embedding_provider(
-            settings,
-            app_logger=app_logger,
+        memory_embedding_provider = SynchronizedEmbeddingProvider(
+            build_memory_embedding_provider(
+                settings,
+                app_logger=app_logger,
+            )
         )
         extraction_model = (
             MockMemoryExtractionModelClient() if settings.use_mock_llm else chat_model
@@ -89,10 +94,16 @@ def build_controller(
             enable_window_extraction=settings.enable_memory_window_extraction,
         )
         memory_write_classifier = MemoryWriteClassifier()
+        semantic_query_coordinator = SemanticQueryCoordinator(
+            provider=memory_embedding_provider,
+            active_roles=("memory_recall",),
+            app_logger=app_logger,
+        )
     else:
         memory_reader = DisabledMemoryReader()
         memory_writer = DisabledMemoryWriter()
         memory_write_classifier = DisabledMemoryWriteClassifier()
+        semantic_query_coordinator = DisabledSemanticQueryCoordinator()
     response_generator = ResponseGenerator(chat_model)
     state_updater = StateUpdater(StateUpdateClassifier())
     if settings.enable_prompt_run_log:
@@ -121,6 +132,7 @@ def build_controller(
         response_generator=response_generator,
         trace_logger=trace_logger,
         prompt_run_logger=prompt_run_logger,
+        semantic_query_coordinator=semantic_query_coordinator,
     )
     memory_admin = MemoryAdminService(
         store,

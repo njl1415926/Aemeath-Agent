@@ -6,6 +6,7 @@ from app.embeddings.artifacts import prepare_embedding_query
 from app.embeddings.errors import EmbeddingInvalidResponseError
 from app.embeddings.ports import EmbeddingProviderPort, QueryEmbeddingSourcePort
 from app.embeddings.query import DirectQueryEmbeddingSource
+from app.embeddings.schemas import ResolvedQueryEmbedding
 from app.errors import map_exception
 from app.memory.observability import record_memory_event
 from app.memory.schemas import (
@@ -17,6 +18,7 @@ from app.memory.store import MemoryStore
 from app.observability.noop import NoopAppLogger
 from app.observability.ports import AppLoggerPort
 from app.schemas import MemoryRecord
+from app.semantic.schemas import TurnSemanticContext
 
 _EXPLICIT_RECALL_KEYWORDS = ("记得", "还记得", "回忆", "之前")
 
@@ -74,10 +76,33 @@ class MemoryReader:
         ascii_tokens = [token.lower() for token in re.findall(r"[A-Za-z0-9_]{3,}", text)]
         return list(dict.fromkeys(chinese_tokens + ascii_tokens))
 
-    def retrieve_query(self, *, memory_query: MemoryQuery) -> list[MemorySearchResult]:
+    def retrieve_query(
+        self,
+        *,
+        memory_query: MemoryQuery,
+        semantic_context: TurnSemanticContext | None = None,
+    ) -> list[MemorySearchResult]:
         tokens = self._extract_keywords(memory_query.query_text)
         if not self._should_read(memory_query=memory_query, tokens=tokens):
+            self._record_semantic_usage(
+                semantic_context=semantic_context,
+                memory_query=memory_query,
+                consumed=False,
+                reason="low_information_input",
+            )
             return []
+        if semantic_context is not None:
+            resolution = semantic_context.resolution_for("memory_recall")
+            if resolution.status == "ready" and resolution.resolved_embedding is not None:
+                return self._retrieve_resolved_embedding(
+                    memory_query=memory_query,
+                    tokens=tokens,
+                    resolved=resolution.resolved_embedding,
+                    semantic_context=semantic_context,
+                )
+            return self._finalize(
+                self._keyword_results(memory_query=memory_query, tokens=tokens)
+            )
         if self.query_embedding_source is None:
             return self._finalize(
                 self._keyword_results(memory_query=memory_query, tokens=tokens)
@@ -135,10 +160,6 @@ class MemoryReader:
                 != self.query_embedding_source.signature.canonical()
             ):
                 raise EmbeddingInvalidResponseError("query_signature_mismatch")
-            prepared_query = prepare_embedding_query(
-                signature=resolved.signature,
-                vector=resolved.vector,
-            )
         except Exception as exc:  # Query generation must not take down the dialogue turn.
             fallback = self._keyword_results(memory_query=memory_query, tokens=tokens)
             error_info = map_exception(exc)
@@ -156,6 +177,58 @@ class MemoryReader:
                 character_id=memory_query.character_id,
             )
             return self._finalize(fallback)
+
+        return self._retrieve_resolved_embedding(
+            memory_query=memory_query,
+            tokens=tokens,
+            resolved=resolved,
+            semantic_context=None,
+        )
+
+    def _retrieve_resolved_embedding(
+        self,
+        *,
+        memory_query: MemoryQuery,
+        tokens: list[str],
+        resolved: ResolvedQueryEmbedding,
+        semantic_context: TurnSemanticContext | None,
+    ) -> list[MemorySearchResult]:
+        try:
+            prepared_query = prepare_embedding_query(
+                signature=resolved.signature,
+                vector=resolved.vector,
+            )
+        except Exception as exc:
+            fallback = self._keyword_results(memory_query=memory_query, tokens=tokens)
+            error_info = map_exception(exc)
+            self._record_semantic_usage(
+                semantic_context=semantic_context,
+                memory_query=memory_query,
+                consumed=False,
+                reason="resolved_embedding_invalid",
+            )
+            record_memory_event(
+                self.app_logger,
+                event_name="memory.recall_degraded",
+                level="warning",
+                error_code=error_info.code.value,
+                payload={
+                    "fallback_strategy": "keyword",
+                    "keyword_result_count": len(fallback),
+                },
+                user_id=memory_query.user_id,
+                session_id=memory_query.session_id,
+                character_id=memory_query.character_id,
+                turn_id=(semantic_context.turn_id if semantic_context is not None else None),
+            )
+            return self._finalize(fallback)
+
+        self._record_semantic_usage(
+            semantic_context=semantic_context,
+            memory_query=memory_query,
+            consumed=True,
+            reason="vector_search_attempted",
+        )
 
         outcome = self.store.search_memory_embedding_artifacts(
             eligibility=MemoryArtifactEligibility(
@@ -239,8 +312,36 @@ class MemoryReader:
             user_id=memory_query.user_id,
             session_id=memory_query.session_id,
             character_id=memory_query.character_id,
+            turn_id=(semantic_context.turn_id if semantic_context is not None else None),
         )
         return self._finalize(merged[:result_limit])
+
+    def _record_semantic_usage(
+        self,
+        *,
+        semantic_context: TurnSemanticContext | None,
+        memory_query: MemoryQuery,
+        consumed: bool,
+        reason: str,
+    ) -> None:
+        if semantic_context is None:
+            return
+        resolution = semantic_context.resolution_for("memory_recall")
+        if resolution.status != "ready":
+            return
+        record_memory_event(
+            self.app_logger,
+            event_name="memory.semantic_query_usage",
+            payload={
+                "semantic_role": "memory_recall",
+                "semantic_vector_consumed": consumed,
+                "semantic_usage_reason": reason,
+            },
+            user_id=memory_query.user_id,
+            session_id=memory_query.session_id,
+            character_id=memory_query.character_id,
+            turn_id=semantic_context.turn_id,
+        )
 
     def _filter_records(
         self,

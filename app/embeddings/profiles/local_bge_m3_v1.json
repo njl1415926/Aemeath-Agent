@@ -14,7 +14,7 @@
   "postprocessing_version": "normalized-float32-v1",
   "canary_set_version": "bge_m3_canary_v1",
   "canary_artifact": "canaries/bge_m3_canary_v1.json",
-  "canary_artifact_sha256": "sha256:6de0f6d98fc5049c6b914856fe19c0aefc9a53ef93fb5d1855eb123c8636f474",
+  "canary_artifact_sha256": "sha256:cbde65c5acffa89df7a1b4db06c819b9dca480113e3491ba64af55b593666ec3",
   "baseline_artifact": null,
   "baseline_artifact_sha256": null,
   "fingerprint_algorithm": "baseline-relative-mask-v1",
