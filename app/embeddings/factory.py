@@ -11,7 +11,7 @@ from typing import Callable, Protocol
 from app.embeddings.config import load_embedding_space_profile
 from app.embeddings.errors import EmbeddingConfigurationError, EmbeddingSecretMissingError
 from app.embeddings.observability import ObservableEmbeddingProvider
-from app.embeddings.ports import EmbeddingProviderPort
+from app.embeddings.runtime import EmbeddingProviderRuntime
 from app.embeddings.schemas import (
     EmbeddingRuntimeOptions,
     EmbeddingSpaceProfile,
@@ -84,7 +84,7 @@ def create_embedding_provider(
     *,
     secret_resolver: SecretResolver = environment_secret_resolver,
     app_logger: AppLoggerPort | None = None,
-) -> EmbeddingProviderPort:
+) -> EmbeddingProviderRuntime:
     """Create an independent runtime provider for an approved vector space."""
     if type(profile) is not EmbeddingSpaceProfile:
         raise EmbeddingConfigurationError("runtime_profile_invalid")
@@ -96,7 +96,7 @@ def create_embedding_provider(
         runtime,
         secret_resolver=secret_resolver,
     )
-    return ObservableEmbeddingProvider(provider, app_logger=app_logger)
+    return _bundle(provider, app_logger=app_logger)
 
 
 def create_qualification_provider(
@@ -107,7 +107,7 @@ def create_qualification_provider(
     app_logger: AppLoggerPort | None = None,
     http_client: object | None = None,
     sleeper: Callable[[float], None] = time.sleep,
-) -> EmbeddingProviderPort:
+) -> EmbeddingProviderRuntime:
     """Explicit probe-only path; this is the sole Factory entry that accepts review."""
     provider = _create_provider(
         profile,
@@ -116,7 +116,7 @@ def create_qualification_provider(
         http_client=http_client,
         sleeper=sleeper,
     )
-    return ObservableEmbeddingProvider(provider, app_logger=app_logger)
+    return _bundle(provider, app_logger=app_logger)
 
 
 def _create_provider(
@@ -171,7 +171,7 @@ def create_legacy_embedding_provider(
     *,
     model_path: Path,
     app_logger: AppLoggerPort | None = None,
-) -> EmbeddingProviderPort:
+) -> EmbeddingProviderRuntime:
     """One-release bridge for AEMEATH_MEMORY_EMBEDDING_* configuration."""
     normalized = provider_name.strip().lower()
     warnings.warn(
@@ -190,4 +190,22 @@ def create_legacy_embedding_provider(
         provider = BgeM3EmbeddingProvider(model_path=model_path)
     else:
         raise EmbeddingConfigurationError("legacy_provider_invalid")
-    return ObservableEmbeddingProvider(provider, app_logger=app_logger)
+    return _bundle(provider, app_logger=app_logger)
+
+
+def _bundle(provider, *, app_logger: AppLoggerPort | None) -> EmbeddingProviderRuntime:
+    close = getattr(provider, "close", None)
+    close_callback = close if callable(close) else _noop_close
+    try:
+        observable = ObservableEmbeddingProvider(provider, app_logger=app_logger)
+        return EmbeddingProviderRuntime(provider=observable, _close=close_callback)
+    except BaseException:
+        try:
+            close_callback()
+        except BaseException:
+            pass
+        raise
+
+
+def _noop_close() -> None:
+    return None

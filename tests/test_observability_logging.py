@@ -103,7 +103,8 @@ def test_controller_writes_trace_log_when_enabled(settings):
     )
     from app.main import build_controller
 
-    controller, _memory_admin, resolved_settings, _store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, resolved_settings = runtime.agent_service.controller, runtime.settings
     output = controller.handle_user_message(
         AgentTurnInput(
             user_id=resolved_settings.default_user_id,
@@ -131,7 +132,8 @@ def test_controller_failed_turn_trace_contains_safe_error_fields(settings):
     )
     from app.main import build_controller
 
-    controller, _memory_admin, resolved_settings, _store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, resolved_settings = runtime.agent_service.controller, runtime.settings
     controller.response_generator = _FailingResponseGenerator()
 
     with pytest.raises(ValueError):

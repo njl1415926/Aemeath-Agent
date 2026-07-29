@@ -41,12 +41,12 @@ def test_approved_hash_baseline_recomputes_byte_for_byte_through_factory() -> No
         == profile.baseline_artifact_sha256
     )
 
-    provider = create_embedding_provider(
+    provider_runtime = create_embedding_provider(
         profile,
         EmbeddingRuntimeOptions(allow_hash=True, batch_size=2),
         secret_resolver=_unexpected_secret_lookup,
     )
-    result = provider.embed(
+    result = provider_runtime.provider.embed(
         EmbeddingRequest(
             texts=tuple(item.text for item in canary_set.items),
             purpose="document",
@@ -55,13 +55,14 @@ def test_approved_hash_baseline_recomputes_byte_for_byte_through_factory() -> No
 
     assert result.signature == profile.signature
     assert result.vectors.tobytes(order="C") == baseline_bytes
+    provider_runtime.close()
 
 
 def test_approved_hash_profile_passes_offline_qualification() -> None:
     profile = load_embedding_space_profile("deterministic_hash_v1")
     canary_set = load_canary_set(profile)
     baseline = load_baseline(profile, canary_count=len(canary_set.items))
-    provider = create_embedding_provider(
+    provider_runtime = create_embedding_provider(
         profile,
         EmbeddingRuntimeOptions(allow_hash=True, batch_size=2),
         secret_resolver=_unexpected_secret_lookup,
@@ -71,7 +72,7 @@ def test_approved_hash_profile_passes_offline_qualification() -> None:
         profile=profile,
         canary_set=canary_set,
         baseline=baseline,
-        provider=provider,
+        provider=provider_runtime.provider,
         repeat_count=2,
     )
 
@@ -87,6 +88,7 @@ def test_approved_hash_profile_passes_offline_qualification() -> None:
         == profile.expected_fingerprint
         for observation in probe.observations
     )
+    provider_runtime.close()
 
 
 def test_local_bge_profile_remains_unqualified_review_only() -> None:

@@ -359,6 +359,9 @@ def test_api_model_provider_error_does_not_fallback(settings, monkeypatch):
                 fp=BytesIO(b"api_key=secret-provider-key"),
             )
 
+        def close(self):
+            return None
+
     monkeypatch.setattr("app.main.DeepSeekClient", FailingDeepSeekClient)
     api_settings = replace(
         settings,

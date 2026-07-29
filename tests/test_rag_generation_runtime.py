@@ -10,6 +10,7 @@ from app.embeddings.config import load_embedding_space_profile
 from app.embeddings.errors import EmbeddingInvalidResponseError
 from app.embeddings.providers.hash import DeterministicHashEmbeddingProvider
 from app.embeddings.query import DirectQueryEmbeddingSource
+from app.embeddings.runtime import EmbeddingProviderRuntime
 from app.embeddings.schemas import EmbeddingRequest, ResolvedQueryEmbedding
 from app.retrieval.canonical_retriever import CanonicalRagRetriever
 from app.retrieval.documents import ChunkRecord
@@ -35,6 +36,7 @@ from app.retrieval.index_manifest import (
     sanitize_source_id,
     utc_now,
 )
+from app.retrieval.manage_rag_index import _with_provider_runtime
 from app.retrieval.manage_rag_index import main as rag_index_main
 from app.retrieval.vector_index import SqliteVectorStore
 
@@ -593,3 +595,24 @@ def test_canonical_retriever_rejects_late_artifact_diagnostics(tmp_path):
     assert outcome.hits == []
     assert outcome.diagnostics is not None
     assert [issue.reason for issue in outcome.diagnostics.issues] == ["legacy_unverified"]
+
+
+def test_rag_runtime_closes_bundle_on_success():
+    closed = []
+    runtime = EmbeddingProviderRuntime(
+        provider=object(),  # type: ignore[arg-type]
+        _close=lambda: closed.append(True),
+    )
+    assert _with_provider_runtime(runtime, lambda provider: provider) is runtime.provider
+    assert closed == [True]
+
+
+def test_rag_runtime_close_failure_does_not_replace_primary_error():
+    def close():
+        raise RuntimeError("close failure secret")
+
+    runtime = EmbeddingProviderRuntime(provider=object(), _close=close)  # type: ignore[arg-type]
+    primary = RagIndexBuildError("primary_failure")
+    with pytest.raises(RagIndexBuildError) as raised:
+        _with_provider_runtime(runtime, lambda _provider: (_ for _ in ()).throw(primary))
+    assert raised.value is primary

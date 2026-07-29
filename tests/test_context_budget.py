@@ -15,6 +15,7 @@ from app.agent.prompt_context import (
 )
 from app.config import Settings
 from app.embeddings.providers.hash import DeterministicHashEmbeddingProvider
+from app.embeddings.runtime import EmbeddingProviderRuntime
 from app.embeddings.schemas import EmbeddingRequest
 from app.schemas import AgentTurnInput
 from app.utils.ids import new_id
@@ -336,7 +337,8 @@ def test_cli_and_api_runtime_use_the_same_context_budget_policy(settings, tmp_pa
         context_budget_memory_limit=3,
         context_budget_evidence_limit=2,
     )
-    controller, _memory_admin, _resolved, _store = build_controller(settings=configured)
+    cli_runtime = build_controller(settings=configured)
+    controller = cli_runtime.agent_service.controller
     api_app = create_app(replace(configured, db_path=tmp_path / "api.db"))
 
     cli_policy = controller.context_builder.context_compressor.policy
@@ -373,22 +375,22 @@ def test_context_budget_does_not_change_t0135_semantic_query(
     def build_provider(*_args, **_kwargs):
         provider = _RecordingHashProvider()
         providers.append(provider)
-        return provider
+        return EmbeddingProviderRuntime(provider=provider, _close=lambda: None)
 
-    monkeypatch.setattr("app.main.build_memory_embedding_provider", build_provider)
+    monkeypatch.setattr("app.main.build_memory_embedding_runtime", build_provider)
     base = replace(
         settings,
         enable_long_term_memory=True,
         memory_embedding_provider="hash",
     )
-    disabled_controller, *_ = build_controller(
+    disabled_runtime = build_controller(
         settings=replace(
             base,
             db_path=tmp_path / "disabled.db",
             enable_context_budget=False,
         )
     )
-    enabled_controller, *_ = build_controller(
+    enabled_runtime = build_controller(
         settings=replace(
             base,
             db_path=tmp_path / "enabled.db",
@@ -397,7 +399,10 @@ def test_context_budget_does_not_change_t0135_semantic_query(
         )
     )
 
-    for controller in (disabled_controller, enabled_controller):
+    for controller in (
+        disabled_runtime.agent_service.controller,
+        enabled_runtime.agent_service.controller,
+    ):
         controller.handle_user_message(
             AgentTurnInput(
                 user_id=settings.default_user_id,
@@ -426,7 +431,8 @@ def test_budget_trace_and_prompt_log_exclude_dropped_body(settings, tmp_path: Pa
         enable_prompt_run_log=True,
         prompt_run_log_root=tmp_path / "prompts",
     )
-    controller, _memory_admin, resolved, _store = build_controller(settings=configured)
+    runtime = build_controller(settings=configured)
+    controller, resolved = runtime.agent_service.controller, runtime.settings
     character = controller.character_provider.build_runtime_context(
         character_id=resolved.default_character_id,
         user_input="log budget test",

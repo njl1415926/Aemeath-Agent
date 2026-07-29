@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from app.errors import map_exception
-from app.main import build_agent_service
+from app.main import build_application_runtime
+from app.runtime.resources import ApplicationRuntime
 from app.services.schemas import ChatRequest, UserContext
 from app.session.errors import SessionError
 from app.session.ports import SessionStorePort
@@ -136,7 +137,18 @@ def _handle_session_command(
 
 
 def run_cli() -> int:
-    agent_service, memory_admin, settings, store = build_agent_service()
+    runtime = build_application_runtime(surface="cli")
+    try:
+        return _run_cli(runtime)
+    finally:
+        runtime.close()
+
+
+def _run_cli(runtime: ApplicationRuntime) -> int:
+    agent_service = runtime.agent_service
+    memory_admin = runtime.memory_admin_service
+    settings = runtime.settings
+    store = runtime.store
     user_id = settings.default_user_id
     current_session = _new_cli_session(
         session_store=store,

@@ -5,6 +5,7 @@ from typing import Literal
 
 from app.embeddings.artifacts import canonicalize_embedding_text
 from app.semantic.budget import SemanticQueryBudget
+from app.semantic.eligibility import DeterministicSemanticEligibilityPolicyV01
 from app.semantic.schemas import (
     SemanticMessage,
     SemanticQueryStrategy,
@@ -77,6 +78,11 @@ class _DependencyBlock:
 class NeutralTurnQueryBuilderV01:
     construction_version = SEMANTIC_QUERY_CONSTRUCTION_VERSION
 
+    def __init__(self, *, eligibility_policy=None):
+        self._eligibility_policy = eligibility_policy or (
+            DeterministicSemanticEligibilityPolicyV01()
+        )
+
     def build(
         self,
         *,
@@ -104,6 +110,22 @@ class NeutralTurnQueryBuilderV01:
                 construction_version=self.construction_version,
                 budget_version=budget.version,
                 query_strategy="current_only",
+                canonical_query=None,
+                query_char_count=current_chars,
+                query_utf8_bytes=current_bytes,
+            )
+
+        eligibility = self._eligibility_policy.evaluate(
+            text=current,
+            depends_on_context=_depends_on_context(current),
+        )
+        if not eligibility.eligible:
+            return BuiltSemanticQuery(
+                status="skipped",
+                reason_code=eligibility.reason_code,
+                construction_version=self.construction_version,
+                budget_version=budget.version,
+                query_strategy="none",
                 canonical_query=None,
                 query_char_count=current_chars,
                 query_utf8_bytes=current_bytes,

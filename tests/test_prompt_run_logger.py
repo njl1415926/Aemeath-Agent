@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -54,6 +55,39 @@ def test_jsonl_prompt_run_logger_writes_utf8_record(tmp_path: Path):
     assert record["sections"][0]["source_ids"] == ["world_info:160"]
 
 
+def test_prompt_run_logger_keeps_concurrent_records_line_parseable(tmp_path: Path):
+    logger = JsonlPromptRunLogger(root_dir=tmp_path / "parallel")
+
+    def write(index: int) -> None:
+        logger.record(
+            PromptRunRecord(
+                run_id=f"run_{index}",
+                turn_id=f"turn_{index}",
+                session_id="session",
+                user_id="user",
+                character_id="aemeath",
+                model="test",
+                messages=[],
+                prompt_context_metadata={},
+                sections=[],
+                response="synthetic",
+                warnings=[],
+                status="completed",
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(write, range(50)))
+    records = [
+        json.loads(line)
+        for line in logger.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 50
+    assert {record["run_id"] for record in records} == {
+        f"run_{index}" for index in range(50)
+    }
+
+
 def test_controller_writes_prompt_run_log_when_enabled(settings):
     settings = replace(
         settings,
@@ -62,7 +96,8 @@ def test_controller_writes_prompt_run_log_when_enabled(settings):
     )
     from app.main import build_controller
 
-    controller, _memory_admin, resolved_settings, _store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, resolved_settings = runtime.agent_service.controller, runtime.settings
     session_id = new_id("session")
 
     output = controller.handle_user_message(
@@ -110,7 +145,8 @@ def test_controller_failed_prompt_run_log_contains_safe_error_fields(settings):
     )
     from app.main import build_controller
 
-    controller, _memory_admin, resolved_settings, _store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, resolved_settings = runtime.agent_service.controller, runtime.settings
     controller.response_generator = _FailingResponseGenerator()
 
     with pytest.raises(ValueError):

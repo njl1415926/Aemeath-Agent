@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import RLock
+from typing import Iterator
 
 import numpy as np
 
@@ -14,6 +16,7 @@ from app.embeddings.validation import validate_normalized_vectors
 from app.errors import AemeathError, ErrorCode, map_exception
 from app.observability.noop import NoopAppLogger
 from app.observability.ports import AppLoggerPort
+from app.runtime.guardrails.errors import RuntimeBusyError
 from app.semantic.budget import SemanticQueryBudget, load_semantic_query_budget
 from app.semantic.errors import (
     SemanticCoordinatorUnhealthyError,
@@ -73,6 +76,7 @@ class SemanticQueryCoordinator:
         query_budget: SemanticQueryBudget | None = None,
         app_logger: AppLoggerPort | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        state_wait_timeout_seconds: float = 2.0,
     ):
         configured_roles = tuple(active_roles)
         if len(set(configured_roles)) != len(configured_roles):
@@ -89,6 +93,7 @@ class SemanticQueryCoordinator:
         self._app_logger = app_logger or NoopAppLogger()
         self._clock = clock
         self._state_lock = RLock()
+        self._state_wait_timeout_seconds = state_wait_timeout_seconds
         self._unhealthy_state: _UnhealthyState | None = None
 
     def prepare_turn_context(
@@ -110,6 +115,14 @@ class SemanticQueryCoordinator:
 
         try:
             self._raise_if_unhealthy()
+        except RuntimeBusyError:
+            context = self._local_capacity_context(
+                turn_input=turn_input,
+                built=None,
+                started_at=started_at,
+            )
+            self._record_context(context, turn_input)
+            return context
         except SemanticCoordinatorUnhealthyError as exc:
             record_semantic_failure(
                 self._app_logger,
@@ -151,6 +164,14 @@ class SemanticQueryCoordinator:
         )
         try:
             resolved_by_role, unique_query_count = self._resolve_requests(requests)
+        except RuntimeBusyError:
+            context = self._local_capacity_context(
+                turn_input=turn_input,
+                built=built,
+                started_at=started_at,
+            )
+            self._record_context(context, turn_input)
+            return context
         except Exception as exc:
             duration_ms = self._duration_ms(started_at)
             error_code = self._error_code(exc)
@@ -188,7 +209,7 @@ class SemanticQueryCoordinator:
         self,
         requests: tuple[SemanticQueryRequest, ...],
     ) -> tuple[dict[SemanticQueryRole, ResolvedQueryEmbedding], int]:
-        with self._state_lock:
+        with self._state_guard():
             if self._unhealthy_state is not None:
                 raise SemanticCoordinatorUnhealthyError(
                     cause_error_code=self._unhealthy_state.cause_error_code
@@ -265,11 +286,21 @@ class SemanticQueryCoordinator:
             )
 
     def _raise_if_unhealthy(self) -> None:
-        with self._state_lock:
+        with self._state_guard():
             if self._unhealthy_state is not None:
                 raise SemanticCoordinatorUnhealthyError(
                     cause_error_code=self._unhealthy_state.cause_error_code
                 )
+
+    @contextmanager
+    def _state_guard(self) -> Iterator[None]:
+        acquired = self._state_lock.acquire(timeout=self._state_wait_timeout_seconds)
+        if not acquired:
+            raise RuntimeBusyError("semantic_coordinator_state")
+        try:
+            yield
+        finally:
+            self._state_lock.release()
 
     def _ready_context(
         self,
@@ -312,6 +343,26 @@ class SemanticQueryCoordinator:
             active_reason_code="embedding_transient_failure",
             resolved_by_role=None,
             error_code=error_code.value,
+        )
+
+    def _local_capacity_context(
+        self,
+        *,
+        turn_input: SemanticTurnInput,
+        built: BuiltSemanticQuery | None,
+        started_at: float,
+    ) -> TurnSemanticContext:
+        return self._make_context(
+            turn_input=turn_input,
+            built=built,
+            status="failed",
+            duration_ms=self._duration_ms(started_at),
+            unique_query_count=0,
+            provider_called=False,
+            active_status="failed",
+            active_reason_code="embedding_local_capacity",
+            resolved_by_role=None,
+            error_code=ErrorCode.RUNTIME_BUSY.value,
         )
 
     def _context_without_provider(

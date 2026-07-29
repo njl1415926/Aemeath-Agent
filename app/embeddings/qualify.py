@@ -18,7 +18,7 @@ from app.embeddings.config import (
     load_canary_set,
     load_profile_for_qualification,
 )
-from app.embeddings.errors import EmbeddingQualificationError
+from app.embeddings.errors import EmbeddingQualificationError, EmbeddingUnavailableError
 from app.embeddings.factory import create_qualification_provider
 from app.embeddings.observability import record_qualification_terminal
 from app.embeddings.qualification import (
@@ -128,21 +128,24 @@ def main(
             # Refuse the path before loading a model or making a paid API call.
             if output_dir.exists():
                 raise EmbeddingQualificationError("candidate_output_already_exists")
-            provider = create_qualification_provider(
+            provider_runtime = create_qualification_provider(
                 profile,
                 runtime,
                 app_logger=logger,
             )
-            captured = capture_candidate(
-                profile=profile,
-                canary_set=canary_set,
-                provider=provider,
-                output_dir=output_dir,
-                thresholds=QualificationThresholds(
-                    min_cosine_per_vector=args.min_cosine_per_vector,
-                    max_abs_coordinate_delta=args.max_abs_coordinate_delta,
+            captured = _with_provider_runtime(
+                provider_runtime,
+                lambda provider: capture_candidate(
+                    profile=profile,
+                    canary_set=canary_set,
+                    provider=provider,
+                    output_dir=output_dir,
+                    thresholds=QualificationThresholds(
+                        min_cosine_per_vector=args.min_cosine_per_vector,
+                        max_abs_coordinate_delta=args.max_abs_coordinate_delta,
+                    ),
+                    repeat_count=args.repeat_count,
                 ),
-                repeat_count=args.repeat_count,
             )
             probe = captured.probe
             error_code = (
@@ -176,17 +179,20 @@ def main(
         # Both review and approved manifests may be verified once all baseline fields
         # are filled.  Only the normal runtime Factory restricts selection to approved.
         baseline = load_baseline(profile, canary_count=len(canary_set.items))
-        provider = create_qualification_provider(
+        provider_runtime = create_qualification_provider(
             profile,
             runtime,
             app_logger=logger,
         )
-        probe = run_qualification_probe(
-            profile=profile,
-            canary_set=canary_set,
-            baseline=baseline,
-            provider=provider,
-            repeat_count=args.repeat_count,
+        probe = _with_provider_runtime(
+            provider_runtime,
+            lambda provider: run_qualification_probe(
+                profile=profile,
+                canary_set=canary_set,
+                baseline=baseline,
+                provider=provider,
+                repeat_count=args.repeat_count,
+            ),
         )
         error_code = (
             None if probe.passed else ErrorCode.EMBEDDING_QUALIFICATION_FAILED.value
@@ -299,6 +305,21 @@ def _print_json(payload: dict[str, object]) -> None:
     sys.stdout.write(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n"
     )
+
+
+def _with_provider_runtime(provider_runtime, operation):
+    primary_error: BaseException | None = None
+    try:
+        return operation(provider_runtime.provider)
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            provider_runtime.close()
+        except BaseException as exc:
+            if primary_error is None:
+                raise EmbeddingUnavailableError(reason="provider_close_failed") from exc
 
 
 if __name__ == "__main__":

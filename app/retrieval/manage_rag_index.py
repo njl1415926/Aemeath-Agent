@@ -11,7 +11,7 @@ from app.embeddings import (
     create_embedding_provider,
     load_embedding_space_profile,
 )
-from app.embeddings.errors import EmbeddingError
+from app.embeddings.errors import EmbeddingError, EmbeddingUnavailableError
 from app.retrieval.canonical_retriever import CanonicalRagRetriever
 from app.retrieval.documents import count_by_namespace, load_wuwa_gamedata_chunks
 from app.retrieval.errors import RagIndexError
@@ -92,7 +92,7 @@ def _config(args: argparse.Namespace) -> RagIndexConfig:
     return RagIndexConfig.from_environment(index_id=args.index_id)
 
 
-def _provider(args: argparse.Namespace):
+def _provider_runtime(args: argparse.Namespace):
     profile = load_embedding_space_profile(args.profile)
     runtime = EmbeddingRuntimeOptions(
         batch_size=args.provider_batch_size,
@@ -106,14 +106,17 @@ def _provider(args: argparse.Namespace):
 
 def _run_build(args: argparse.Namespace) -> int:
     chunks = load_wuwa_gamedata_chunks(args.source_dir)
-    provider = _provider(args)
-    result = RagGenerationBuilder(
-        config=_config(args),
-        embedding_provider=provider,
-        write_batch_size=args.write_batch_size,
-        lock_timeout_seconds=args.lock_timeout,
-        allow_hash=args.allow_hash,
-    ).build(chunks, activate=not args.no_activate)
+    provider_runtime = _provider_runtime(args)
+    result = _with_provider_runtime(
+        provider_runtime,
+        lambda provider: RagGenerationBuilder(
+            config=_config(args),
+            embedding_provider=provider,
+            write_batch_size=args.write_batch_size,
+            lock_timeout_seconds=args.lock_timeout,
+            allow_hash=args.allow_hash,
+        ).build(chunks, activate=not args.no_activate),
+    )
     print(f"generation_id={result.generation_id}")
     print(f"status={result.status} build_mode={result.build_mode}")
     print(f"activated={result.activated} resumed={result.resumed} no_op={result.no_op}")
@@ -158,16 +161,18 @@ def _run_status(args: argparse.Namespace) -> int:
 
 
 def _run_query(args: argparse.Namespace) -> int:
-    provider = _provider(args)
-    retriever = CanonicalRagRetriever(
-        config=_config(args),
-        query_source=DirectQueryEmbeddingSource(provider),
-    )
-    outcome = retriever.search_with_outcome(
-        query=args.query,
-        namespaces=args.namespaces,
-        limit=args.limit,
-        metadata={"retrieval_intent": args.retrieval_intent},
+    provider_runtime = _provider_runtime(args)
+    outcome = _with_provider_runtime(
+        provider_runtime,
+        lambda provider: CanonicalRagRetriever(
+            config=_config(args),
+            query_source=DirectQueryEmbeddingSource(provider),
+        ).search_with_outcome(
+            query=args.query,
+            namespaces=args.namespaces,
+            limit=args.limit,
+            metadata={"retrieval_intent": args.retrieval_intent},
+        ),
     )
     print(
         f"availability={outcome.availability_reason} "
@@ -180,6 +185,21 @@ def _run_query(args: argparse.Namespace) -> int:
         )
         print(item.content)
     return 0 if outcome.availability_reason in {"available", "no_ready_generation"} else 2
+
+
+def _with_provider_runtime(provider_runtime, operation):
+    primary_error: BaseException | None = None
+    try:
+        return operation(provider_runtime.provider)
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            provider_runtime.close()
+        except BaseException as exc:
+            if primary_error is None:
+                raise EmbeddingUnavailableError(reason="provider_close_failed") from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:

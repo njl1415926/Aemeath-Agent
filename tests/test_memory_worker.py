@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from app.db.sqlite_store import SQLiteStore
+from app.memory import worker
 from app.memory.schemas import MemoryExtractionResult
 from app.memory.worker import _process_memory_extraction_job
 
@@ -88,3 +92,19 @@ def test_memory_worker_completes_fact_job_with_fixed_artifact_result_fields(
         "artifact_written_memory_ids": ["memory_created"],
         "embedding_pending_memory_ids": ["memory_existing"],
     }
+
+
+def test_memory_worker_closes_registered_resources_when_active_loop_fails(
+    settings,
+    monkeypatch,
+) -> None:
+    closed = []
+
+    def fail(_settings, *, app_logger, resources):
+        resources.register(name="test_resource", close=lambda: closed.append(True))
+        raise RuntimeError("worker failure")
+
+    monkeypatch.setattr(worker, "_run_worker_active", fail)
+    with pytest.raises(RuntimeError):
+        worker.run_worker(replace(settings, enable_long_term_memory=True))
+    assert closed == [True]

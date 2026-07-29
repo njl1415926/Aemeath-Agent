@@ -116,9 +116,9 @@ def test_memory_admin_validates_session_before_reading_messages(
 
 def test_memory_admin_extract_accepts_ended_session_and_rejects_archived(settings):
     controller_settings = replace(settings, enable_long_term_memory=True)
-    _controller, admin, resolved_settings, store = build_controller(
-        settings=controller_settings
-    )
+    runtime = build_controller(settings=controller_settings)
+    admin = runtime.memory_admin_service
+    resolved_settings, store = runtime.settings, runtime.store
     session = store.create_session(
         user_id=resolved_settings.default_user_id,
         character_id=resolved_settings.default_character_id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +84,31 @@ class Settings:
     context_budget_recent_message_limit: int = 8
     context_budget_memory_limit: int = 4
     context_budget_evidence_limit: int = 4
+    runtime_session_wait_timeout_seconds: float = 5.0
+    runtime_dialogue_max_concurrency: int = 2
+    runtime_dialogue_wait_timeout_seconds: float = 0.25
+    runtime_llm_max_concurrency: int = 2
+    runtime_llm_wait_timeout_seconds: float = 2.0
+    runtime_embedding_max_concurrency: int = 1
+    runtime_embedding_wait_timeout_seconds: float = 2.0
+    api_chat_user_rate_per_minute: int = 12
+    api_chat_user_burst: int = 4
+    api_chat_ip_rate_per_minute: int = 60
+    api_chat_ip_burst: int = 20
+    api_rate_limit_idle_ttl_seconds: float = 600.0
+    deepseek_connect_timeout_seconds: float = 3.0
+    deepseek_read_timeout_seconds: float = 15.0
+    deepseek_write_timeout_seconds: float = 5.0
+    deepseek_pool_timeout_seconds: float = 1.0
+    deepseek_max_retries: int = 1
+    deepseek_retry_backoff_seconds: float = 0.25
+    deepseek_retry_backoff_max_seconds: float = 2.0
+    deepseek_retry_after_max_seconds: float = 5.0
+    deepseek_max_output_tokens: int = 1024
+    chat_message_max_chars: int = 4000
+    chat_message_max_utf8_bytes: int = 12000
+    chat_metadata_max_utf8_bytes: int = 8192
+    enable_semantic_low_information_skip: bool = True
 
     @staticmethod
     def from_env() -> "Settings":
@@ -224,6 +250,75 @@ class Settings:
             context_budget_evidence_limit=int(
                 os.getenv("AEMEATH_CONTEXT_BUDGET_EVIDENCE_LIMIT", "4")
             ),
+            runtime_session_wait_timeout_seconds=float(
+                os.getenv("AEMEATH_RUNTIME_SESSION_WAIT_TIMEOUT_SECONDS", "5")
+            ),
+            runtime_dialogue_max_concurrency=int(
+                os.getenv("AEMEATH_RUNTIME_MAX_DIALOGUE_TURNS", "2")
+            ),
+            runtime_dialogue_wait_timeout_seconds=float(
+                os.getenv("AEMEATH_RUNTIME_DIALOGUE_WAIT_TIMEOUT_SECONDS", "0.25")
+            ),
+            runtime_llm_max_concurrency=int(
+                os.getenv("AEMEATH_RUNTIME_MAX_LLM_REQUESTS", "2")
+            ),
+            runtime_llm_wait_timeout_seconds=float(
+                os.getenv("AEMEATH_RUNTIME_LLM_WAIT_TIMEOUT_SECONDS", "2")
+            ),
+            runtime_embedding_max_concurrency=int(
+                os.getenv("AEMEATH_RUNTIME_MAX_EMBEDDING_REQUESTS", "1")
+            ),
+            runtime_embedding_wait_timeout_seconds=float(
+                os.getenv("AEMEATH_RUNTIME_EMBEDDING_WAIT_TIMEOUT_SECONDS", "2")
+            ),
+            api_chat_user_rate_per_minute=int(
+                os.getenv("AEMEATH_API_CHAT_USER_RATE_PER_MINUTE", "12")
+            ),
+            api_chat_user_burst=int(os.getenv("AEMEATH_API_CHAT_USER_BURST", "4")),
+            api_chat_ip_rate_per_minute=int(
+                os.getenv("AEMEATH_API_CHAT_IP_RATE_PER_MINUTE", "60")
+            ),
+            api_chat_ip_burst=int(os.getenv("AEMEATH_API_CHAT_IP_BURST", "20")),
+            api_rate_limit_idle_ttl_seconds=float(
+                os.getenv("AEMEATH_API_RATE_LIMIT_IDLE_TTL_SECONDS", "600")
+            ),
+            deepseek_connect_timeout_seconds=float(
+                os.getenv("DEEPSEEK_CONNECT_TIMEOUT_SECONDS", "3")
+            ),
+            deepseek_read_timeout_seconds=float(
+                os.getenv("DEEPSEEK_READ_TIMEOUT_SECONDS", "15")
+            ),
+            deepseek_write_timeout_seconds=float(
+                os.getenv("DEEPSEEK_WRITE_TIMEOUT_SECONDS", "5")
+            ),
+            deepseek_pool_timeout_seconds=float(
+                os.getenv("DEEPSEEK_POOL_TIMEOUT_SECONDS", "1")
+            ),
+            deepseek_max_retries=int(os.getenv("DEEPSEEK_MAX_RETRIES", "1")),
+            deepseek_retry_backoff_seconds=float(
+                os.getenv("DEEPSEEK_RETRY_BACKOFF_SECONDS", "0.25")
+            ),
+            deepseek_retry_backoff_max_seconds=float(
+                os.getenv("DEEPSEEK_RETRY_BACKOFF_MAX_SECONDS", "2")
+            ),
+            deepseek_retry_after_max_seconds=float(
+                os.getenv("DEEPSEEK_RETRY_AFTER_MAX_SECONDS", "5")
+            ),
+            deepseek_max_output_tokens=int(
+                os.getenv("DEEPSEEK_MAX_OUTPUT_TOKENS", "1024")
+            ),
+            chat_message_max_chars=int(
+                os.getenv("AEMEATH_CHAT_MESSAGE_MAX_CHARS", "4000")
+            ),
+            chat_message_max_utf8_bytes=int(
+                os.getenv("AEMEATH_CHAT_MESSAGE_MAX_UTF8_BYTES", "12000")
+            ),
+            chat_metadata_max_utf8_bytes=int(
+                os.getenv("AEMEATH_CHAT_METADATA_MAX_UTF8_BYTES", "8192")
+            ),
+            enable_semantic_low_information_skip=_parse_bool(
+                os.getenv("AEMEATH_SEMANTIC_SKIP_LOW_INFORMATION", "true")
+            ),
         )
 
     def validate(self) -> None:
@@ -270,6 +365,60 @@ class Settings:
         ):
             if value < 0:
                 raise ValueError(f"{name} must be non-negative.")
+        positive_ints = (
+            ("AEMEATH_RUNTIME_MAX_DIALOGUE_TURNS", self.runtime_dialogue_max_concurrency),
+            ("AEMEATH_RUNTIME_MAX_LLM_REQUESTS", self.runtime_llm_max_concurrency),
+            ("AEMEATH_RUNTIME_MAX_EMBEDDING_REQUESTS", self.runtime_embedding_max_concurrency),
+            ("AEMEATH_API_CHAT_USER_RATE_PER_MINUTE", self.api_chat_user_rate_per_minute),
+            ("AEMEATH_API_CHAT_USER_BURST", self.api_chat_user_burst),
+            ("AEMEATH_API_CHAT_IP_RATE_PER_MINUTE", self.api_chat_ip_rate_per_minute),
+            ("AEMEATH_API_CHAT_IP_BURST", self.api_chat_ip_burst),
+            ("AEMEATH_CHAT_MESSAGE_MAX_CHARS", self.chat_message_max_chars),
+            ("AEMEATH_CHAT_MESSAGE_MAX_UTF8_BYTES", self.chat_message_max_utf8_bytes),
+            ("AEMEATH_CHAT_METADATA_MAX_UTF8_BYTES", self.chat_metadata_max_utf8_bytes),
+        )
+        for name, value in positive_ints:
+            if isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer.")
+        if self.runtime_embedding_max_concurrency != 1:
+            raise ValueError(
+                "AEMEATH_RUNTIME_MAX_EMBEDDING_REQUESTS must be exactly 1 in v0.1."
+            )
+        nonnegative = (
+            (
+                "AEMEATH_RUNTIME_SESSION_WAIT_TIMEOUT_SECONDS",
+                self.runtime_session_wait_timeout_seconds,
+            ),
+            (
+                "AEMEATH_RUNTIME_DIALOGUE_WAIT_TIMEOUT_SECONDS",
+                self.runtime_dialogue_wait_timeout_seconds,
+            ),
+            ("AEMEATH_RUNTIME_LLM_WAIT_TIMEOUT_SECONDS", self.runtime_llm_wait_timeout_seconds),
+            (
+                "AEMEATH_RUNTIME_EMBEDDING_WAIT_TIMEOUT_SECONDS",
+                self.runtime_embedding_wait_timeout_seconds,
+            ),
+            ("DEEPSEEK_RETRY_BACKOFF_SECONDS", self.deepseek_retry_backoff_seconds),
+            ("DEEPSEEK_RETRY_BACKOFF_MAX_SECONDS", self.deepseek_retry_backoff_max_seconds),
+            ("DEEPSEEK_RETRY_AFTER_MAX_SECONDS", self.deepseek_retry_after_max_seconds),
+        )
+        for name, value in nonnegative:
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be non-negative.")
+        positive_floats = (
+            ("AEMEATH_API_RATE_LIMIT_IDLE_TTL_SECONDS", self.api_rate_limit_idle_ttl_seconds),
+            ("DEEPSEEK_CONNECT_TIMEOUT_SECONDS", self.deepseek_connect_timeout_seconds),
+            ("DEEPSEEK_READ_TIMEOUT_SECONDS", self.deepseek_read_timeout_seconds),
+            ("DEEPSEEK_WRITE_TIMEOUT_SECONDS", self.deepseek_write_timeout_seconds),
+            ("DEEPSEEK_POOL_TIMEOUT_SECONDS", self.deepseek_pool_timeout_seconds),
+        )
+        for name, value in positive_floats:
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive.")
+        if self.deepseek_max_retries < 0:
+            raise ValueError("DEEPSEEK_MAX_RETRIES must be non-negative.")
+        if not 1 <= self.deepseek_max_output_tokens <= 8192:
+            raise ValueError("DEEPSEEK_MAX_OUTPUT_TOKENS must be between 1 and 8192.")
         if self.use_mock_llm:
             return
         if not self.deepseek_api_key:

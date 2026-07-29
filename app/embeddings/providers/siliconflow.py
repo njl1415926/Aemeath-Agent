@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from threading import Condition, Lock
 from typing import Any, Callable
 
 import numpy as np
@@ -54,6 +55,8 @@ class SiliconFlowEmbeddingProvider(BaseEmbeddingProvider):
         client_factory: Callable[[], Any] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ):
+        if client is not None and client_factory is not None:
+            raise EmbeddingConfigurationError("siliconflow_client_ownership_ambiguous")
         if profile.provider != "siliconflow":
             raise EmbeddingConfigurationError("siliconflow_profile_provider_mismatch")
         if (
@@ -73,7 +76,11 @@ class SiliconFlowEmbeddingProvider(BaseEmbeddingProvider):
         self._api_key = api_key
         self._client = client
         self._client_factory = client_factory
+        self._owns_client = client is None
         self._sleeper = sleeper
+        self._resource_condition = Condition(Lock())
+        self._resource_state = "open"
+        self._active_calls = 0
 
     def __repr__(self) -> str:
         return (
@@ -82,57 +89,102 @@ class SiliconFlowEmbeddingProvider(BaseEmbeddingProvider):
         )
 
     def embed(self, request: EmbeddingRequest) -> EmbeddingBatchResult:
-        validate_request(request)
-        if not request.texts:
-            return EmbeddingBatchResult(
-                vectors=empty_vectors(self.dimension),
-                signature=self.signature,
-                usage=EmbeddingUsage(input_count=0, input_tokens=None),
-                diagnostics=EmbeddingCallDiagnostics(),
-            )
-        httpx = self._load_httpx()
-        client = self._get_client(httpx)
-        chunks: list[EmbeddingBatchResult] = []
-        request_ids: list[str | None] = []
-        total_retries = 0
-        input_tokens_total = 0
-        input_tokens_complete = True
-        for start in range(0, len(request.texts), self._runtime.batch_size):
-            texts = request.texts[start:start + self._runtime.batch_size]
-            try:
-                chunk = self._embed_chunk(client=client, httpx=httpx, texts=texts)
-            except EmbeddingError as exc:
-                exc.add_retry_offset(total_retries)
-                raise
-            chunks.append(chunk)
-            diagnostics = chunk.diagnostics or EmbeddingCallDiagnostics()
-            total_retries += diagnostics.retry_count
-            request_ids.append(diagnostics.provider_request_id)
-            if chunk.usage is None or chunk.usage.input_tokens is None:
-                input_tokens_complete = False
-            else:
-                input_tokens_total += chunk.usage.input_tokens
+        httpx, client = self._start_embed(request)
+        try:
+            if not request.texts:
+                return EmbeddingBatchResult(
+                    vectors=empty_vectors(self.dimension),
+                    signature=self.signature,
+                    usage=EmbeddingUsage(input_count=0, input_tokens=None),
+                    diagnostics=EmbeddingCallDiagnostics(),
+                )
+            chunks: list[EmbeddingBatchResult] = []
+            request_ids: list[str | None] = []
+            total_retries = 0
+            input_tokens_total = 0
+            input_tokens_complete = True
+            for start in range(0, len(request.texts), self._runtime.batch_size):
+                texts = request.texts[start:start + self._runtime.batch_size]
+                try:
+                    chunk = self._embed_chunk(client=client, httpx=httpx, texts=texts)
+                except EmbeddingError as exc:
+                    exc.add_retry_offset(total_retries)
+                    raise
+                chunks.append(chunk)
+                diagnostics = chunk.diagnostics or EmbeddingCallDiagnostics()
+                total_retries += diagnostics.retry_count
+                request_ids.append(diagnostics.provider_request_id)
+                if chunk.usage is None or chunk.usage.input_tokens is None:
+                    input_tokens_complete = False
+                else:
+                    input_tokens_total += chunk.usage.input_tokens
 
-        combined = np.concatenate([chunk.vectors for chunk in chunks], axis=0)
-        vectors = normalize_and_validate_vectors(
-            combined,
-            input_count=len(request.texts),
-            dimension=self.dimension,
-            reason_prefix="remote_output",
-        )
-        return EmbeddingBatchResult(
-            vectors=vectors,
-            signature=self.signature,
-            usage=EmbeddingUsage(
+            combined = np.concatenate([chunk.vectors for chunk in chunks], axis=0)
+            vectors = normalize_and_validate_vectors(
+                combined,
                 input_count=len(request.texts),
-                input_tokens=input_tokens_total if input_tokens_complete else None,
-            ),
-            diagnostics=EmbeddingCallDiagnostics(
-                retry_count=total_retries,
-                provider_request_id=request_ids[0] if len(request_ids) == 1 else None,
-                provider_request_ids=tuple(request_ids),
-            ),
-        )
+                dimension=self.dimension,
+                reason_prefix="remote_output",
+            )
+            return EmbeddingBatchResult(
+                vectors=vectors,
+                signature=self.signature,
+                usage=EmbeddingUsage(
+                    input_count=len(request.texts),
+                    input_tokens=input_tokens_total if input_tokens_complete else None,
+                ),
+                diagnostics=EmbeddingCallDiagnostics(
+                    retry_count=total_retries,
+                    provider_request_id=request_ids[0] if len(request_ids) == 1 else None,
+                    provider_request_ids=tuple(request_ids),
+                ),
+            )
+        finally:
+            self._finish_embed()
+
+    def _start_embed(self, request: EmbeddingRequest) -> tuple[Any | None, Any | None]:
+        with self._resource_condition:
+            if self._resource_state != "open":
+                raise EmbeddingConfigurationError("siliconflow_provider_closed")
+            validate_request(request)
+            if request.texts:
+                httpx = self._load_httpx()
+                client = self._get_client_locked(httpx)
+            else:
+                httpx = None
+                client = None
+            self._active_calls += 1
+            return httpx, client
+
+    def _finish_embed(self) -> None:
+        with self._resource_condition:
+            self._active_calls -= 1
+            self._resource_condition.notify_all()
+
+    def close(self) -> None:
+        owned_client = None
+        with self._resource_condition:
+            if self._resource_state == "closed":
+                return
+            if self._resource_state == "closing":
+                while self._resource_state != "closed":
+                    self._resource_condition.wait()
+                return
+            self._resource_state = "closing"
+            while self._active_calls:
+                self._resource_condition.wait()
+            if self._owns_client:
+                owned_client = self._client
+            self._client = None
+        try:
+            if owned_client is not None:
+                close = getattr(owned_client, "close", None)
+                if callable(close):
+                    close()
+        finally:
+            with self._resource_condition:
+                self._resource_state = "closed"
+                self._resource_condition.notify_all()
 
     def _embed_chunk(
         self,
@@ -225,7 +277,9 @@ class SiliconFlowEmbeddingProvider(BaseEmbeddingProvider):
             raise EmbeddingDependencyError("embedding_api_extra_missing") from exc
         return httpx
 
-    def _get_client(self, httpx: Any):
+    def _get_client_locked(self, httpx: Any):
+        if self._resource_state != "open":
+            raise EmbeddingConfigurationError("siliconflow_provider_closed")
         if self._client is None:
             self._client = (
                 self._client_factory()

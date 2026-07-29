@@ -6,7 +6,7 @@ from app.config import Settings
 from app.embeddings.config import load_embedding_space_profile
 from app.embeddings.errors import EmbeddingConfigurationError
 from app.embeddings.factory import create_embedding_provider
-from app.embeddings.ports import EmbeddingProviderPort
+from app.embeddings.runtime import EmbeddingProviderRuntime
 from app.embeddings.schemas import EmbeddingRuntimeOptions
 from app.observability.ports import AppLoggerPort
 
@@ -18,11 +18,11 @@ _LEGACY_PROFILE_MAP = {
 }
 
 
-def build_memory_embedding_provider(
+def build_memory_embedding_runtime(
     settings: Settings,
     *,
     app_logger: AppLoggerPort | None = None,
-) -> EmbeddingProviderPort:
+) -> EmbeddingProviderRuntime:
     profile_id = settings.embedding_profile.strip() if settings.embedding_profile else None
     legacy_provider = (
         settings.memory_embedding_provider.strip().lower()
@@ -61,6 +61,21 @@ def build_memory_embedding_provider(
         _runtime_options(settings, allow_legacy_hash=allow_legacy_hash),
         app_logger=app_logger,
     )
+
+
+def build_memory_embedding_provider(
+    settings: Settings,
+    *,
+    app_logger: AppLoggerPort | None = None,
+) -> EmbeddingProviderRuntime:
+    """Deprecated name retained for one release; it now returns the owned bundle."""
+    warnings.warn(
+        "build_memory_embedding_provider now returns EmbeddingProviderRuntime; "
+        "use build_memory_embedding_runtime.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return build_memory_embedding_runtime(settings, app_logger=app_logger)
 
 
 def _runtime_options(

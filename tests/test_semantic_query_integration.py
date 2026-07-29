@@ -12,6 +12,7 @@ from app.memory.reader import MemoryReader
 from app.memory.schemas import MemoryQuery
 from app.retrieval.provider import WorldInfoEvidenceProvider
 from app.retrieval.schemas import EvidencePack
+from app.runtime.guardrails.concurrency import LimitedEmbeddingProvider
 from app.schemas import AgentTurnInput
 from app.semantic.coordinator import SemanticQueryCoordinator
 from app.semantic.disabled import DisabledSemanticQueryCoordinator
@@ -21,13 +22,14 @@ from app.semantic.schemas import SemanticTurnInput
 def test_main_runtime_injects_one_synchronized_wrapper_by_identity(settings) -> None:
     configured = replace(settings, enable_long_term_memory=True)
 
-    controller, memory_admin, _resolved_settings, _store = build_controller(
-        settings=configured
-    )
+    runtime = build_controller(settings=configured)
+    controller = runtime.agent_service.controller
+    memory_admin = runtime.memory_admin_service
 
     coordinator_provider = controller.semantic_query_coordinator._provider
-    assert isinstance(coordinator_provider, SynchronizedEmbeddingProvider)
-    assert isinstance(coordinator_provider._provider, ObservableEmbeddingProvider)
+    assert isinstance(coordinator_provider, LimitedEmbeddingProvider)
+    assert isinstance(coordinator_provider._provider, SynchronizedEmbeddingProvider)
+    assert isinstance(coordinator_provider._provider._provider, ObservableEmbeddingProvider)
     assert isinstance(controller.memory_reader, MemoryReader)
     assert controller.memory_reader.query_embedding_source is not None
     assert controller.memory_reader.query_embedding_source._provider is coordinator_provider
@@ -37,7 +39,8 @@ def test_main_runtime_injects_one_synchronized_wrapper_by_identity(settings) -> 
 
 
 def test_controller_filters_semantic_roles_and_shares_context_identity(settings) -> None:
-    controller, _memory_admin, _resolved_settings, store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, store = runtime.agent_service.controller, runtime.store
     store.ensure_session(
         session_id="session_semantic",
         user_id="user_default",
@@ -138,7 +141,8 @@ def test_controller_filters_semantic_roles_and_shares_context_identity(settings)
 
 
 def test_world_info_ignores_disabled_ready_and_failed_semantic_contexts(settings) -> None:
-    controller, _memory_admin, _resolved_settings, _store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller = runtime.agent_service.controller
     provider = controller.evidence_provider
     assert isinstance(provider, WorldInfoEvidenceProvider)
     query = "爱弥斯是谁"

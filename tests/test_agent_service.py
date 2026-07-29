@@ -31,7 +31,8 @@ class _FailingController:
 
 
 def test_agent_service_successful_chat(settings):
-    service, _memory_admin, resolved_settings, store = build_agent_service(settings=settings)
+    runtime = build_agent_service(settings=settings)
+    service, resolved_settings, store = runtime.agent_service, runtime.settings, runtime.store
     session_id = new_id("session")
 
     response = service.handle_chat(
@@ -54,7 +55,8 @@ def test_agent_service_successful_chat(settings):
 
 
 def test_agent_service_ended_session_failure_can_be_mapped(settings):
-    service, _memory_admin, resolved_settings, store = build_agent_service(settings=settings)
+    runtime = build_agent_service(settings=settings)
+    service, resolved_settings, store = runtime.agent_service, runtime.settings, runtime.store
     session = store.create_session(
         user_id=resolved_settings.default_user_id,
         character_id=resolved_settings.default_character_id,
@@ -79,7 +81,8 @@ def test_agent_service_ended_session_failure_can_be_mapped(settings):
 
 
 def test_agent_service_archived_session_failure(settings):
-    service, _memory_admin, resolved_settings, store = build_agent_service(settings=settings)
+    runtime = build_agent_service(settings=settings)
+    service, resolved_settings, store = runtime.agent_service, runtime.settings, runtime.store
     session = store.create_session(
         user_id=resolved_settings.default_user_id,
         character_id=resolved_settings.default_character_id,
@@ -98,7 +101,8 @@ def test_agent_service_archived_session_failure(settings):
 
 
 def test_agent_service_unknown_character_fallback_warning(settings):
-    service, _memory_admin, resolved_settings, _store = build_agent_service(settings=settings)
+    runtime = build_agent_service(settings=settings)
+    service, resolved_settings = runtime.agent_service, runtime.settings
 
     response = service.handle_chat(
         user_context=UserContext(user_id=resolved_settings.default_user_id),
@@ -140,14 +144,17 @@ def test_agent_service_app_log_uses_summary_fields_and_does_not_leak_secrets():
             ),
         )
 
-    assert len(logger.records) == 1
-    [record] = logger.records
+    assert [record.event_name for record in logger.records] == [
+        "runtime.dialogue_admitted",
+        "agent_service.chat_failed",
+    ]
+    record = logger.records[-1]
     assert record.event_name == "agent_service.chat_failed"
     assert record.error_code == ErrorCode.INVALID_INPUT.value
     assert record.payload["status"] == "failed"
     assert "duration_ms" in record.payload
 
-    raw = json.dumps(asdict(record), ensure_ascii=False)
+    raw = json.dumps([asdict(item) for item in logger.records], ensure_ascii=False)
     assert "secret123" not in raw
     assert "secret456" not in raw
     assert "auth-secret" not in raw

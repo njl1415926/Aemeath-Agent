@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -60,9 +62,16 @@ def error_response(*, request: Request, error_info: ErrorInfo) -> JSONResponse:
         "error": error_info.to_public_dict(),
         "request_id": request_id,
     }
-    headers = {"X-Request-ID": request_id} if request_id else None
+    headers = {"X-Request-ID": request_id} if request_id else {}
+    retry_after = error_info.metadata.get("retry_after_seconds")
+    if (
+        isinstance(retry_after, (int, float))
+        and not isinstance(retry_after, bool)
+        and retry_after >= 0
+    ):
+        headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
     return JSONResponse(
         status_code=http_status_for_error(error_info),
         content=content,
-        headers=headers,
+        headers=headers or None,
     )

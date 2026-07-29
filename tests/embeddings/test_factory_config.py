@@ -18,7 +18,7 @@ from app.embeddings.schemas import (
     EmbeddingRuntimeOptions,
     QualificationThresholds,
 )
-from app.memory.runtime import build_memory_embedding_provider
+from app.memory.runtime import build_memory_embedding_runtime
 
 REVIEW_PROFILE_IDS = (
     "local_bge_m3_v1",
@@ -92,12 +92,14 @@ def test_factory_hash_requires_explicit_opt_in_and_creates_independent_instances
         secret_resolver=unexpected_secret_lookup,
     )
 
-    assert isinstance(first, EmbeddingProviderPort)
-    assert isinstance(second, EmbeddingProviderPort)
+    assert isinstance(first.provider, EmbeddingProviderPort)
+    assert isinstance(second.provider, EmbeddingProviderPort)
     assert first is not second
     request = EmbeddingRequest(texts=("factory order",), purpose="query")
-    assert first.embed(request).signature == approved.signature
-    assert second.embed(request).signature == approved.signature
+    assert first.provider.embed(request).signature == approved.signature
+    assert second.provider.embed(request).signature == approved.signature
+    first.close()
+    second.close()
 
 
 def test_factory_accepts_canonical_approved_siliconflow_profile() -> None:
@@ -108,17 +110,19 @@ def test_factory_accepts_canonical_approved_siliconflow_profile() -> None:
         requested_secret_names.append(name)
         return "test-only-siliconflow-key"
 
-    provider = create_embedding_provider(
+    provider_runtime = create_embedding_provider(
         approved,
         EmbeddingRuntimeOptions(allow_hash=False),
         secret_resolver=test_secret_lookup,
     )
 
+    provider = provider_runtime.provider
     assert isinstance(provider, EmbeddingProviderPort)
     assert provider.signature == approved.signature
     assert provider.model_name == "Pro/BAAI/bge-m3"
     assert provider.dimension == 1024
     assert requested_secret_names == ["SILICONFLOW_API_KEY"]
+    provider_runtime.close()
 
 
 @pytest.mark.parametrize("profile_id", REVIEW_PROFILE_IDS)
@@ -267,10 +271,12 @@ def test_settings_rejects_non_numeric_embedding_environment(
 
 
 def test_memory_runtime_keeps_explicit_legacy_hash_for_compatibility(settings) -> None:
-    provider = build_memory_embedding_provider(settings)
+    provider_runtime = build_memory_embedding_runtime(settings)
+    provider = provider_runtime.provider
 
     assert provider.model_name == "deterministic_hash_v1"
     assert provider.dimension == 384
+    provider_runtime.close()
 
 
 def test_memory_runtime_rejects_conflicting_canonical_and_legacy_selection(settings) -> None:
@@ -281,7 +287,7 @@ def test_memory_runtime_rejects_conflicting_canonical_and_legacy_selection(setti
     )
 
     with pytest.raises(EmbeddingConfigurationError) as exc_info:
-        build_memory_embedding_provider(configured)
+        build_memory_embedding_runtime(configured)
 
     assert exc_info.value.reason == "canonical_legacy_profile_conflict"
 
@@ -294,7 +300,7 @@ def test_memory_runtime_does_not_create_implicit_hash_when_unconfigured(settings
     )
 
     with pytest.raises(EmbeddingConfigurationError) as exc_info:
-        build_memory_embedding_provider(configured)
+        build_memory_embedding_runtime(configured)
 
     assert exc_info.value.reason == "embedding_profile_not_configured"
 
@@ -307,6 +313,6 @@ def test_memory_runtime_legacy_bge_alias_cannot_bypass_approved_gate(settings) -
     )
 
     with pytest.raises(EmbeddingConfigurationError) as exc_info:
-        build_memory_embedding_provider(configured)
+        build_memory_embedding_runtime(configured)
 
     assert exc_info.value.reason == "profile_not_approved"

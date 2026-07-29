@@ -163,10 +163,52 @@ Success returns `ChatResponse`. Failure re-raises the original exception. CLI an
 adapters should use `map_exception(exc)` and `ErrorInfo.to_public_dict()` instead of relying on
 raw exception text or introducing `ServiceResult` / `ServiceError`.
 
+Before constructing `AgentTurnInput`, the service applies `ChatInputLimitPolicyPort`; it then holds a
+`DialogueAdmissionPort` lease across the complete Controller call. The production admission key is
+`(user_id, session_id)`, and failure before admission has no turn persistence or Provider side effect.
+
 `AgentService` may receive `AppLoggerPort`; the default is `NoopAppLogger`. Service app logs must
 stay summary-only: request id, user id, session id, character id, status, turn id, error code,
 duration, and warning count. They must not include full prompts, model messages, user message
 text, provider raw responses, API keys, authorization headers, cookies, or tokens.
+
+## Runtime Guardrail Interfaces
+
+位置：
+
+- `app/runtime/guardrails/`
+- `app/runtime/resources.py`
+- `app/embeddings/runtime.py`
+
+Stable ports:
+
+```python
+class DialogueAdmissionPort(Protocol):
+    def acquire(
+        self, *, request: DialogueAdmissionRequest
+    ) -> AbstractContextManager[DialogueAdmissionLease]: ...
+
+class ApiRateLimiterPort(Protocol):
+    def check(self, *, request: ApiRateLimitRequest) -> ApiRateLimitDecision: ...
+
+class ChatInputLimitPolicyPort(Protocol):
+    def validate(
+        self, *, request: ChatInputLimitRequest
+    ) -> ChatInputLimitDecision: ...
+```
+
+`ApplicationRuntime` is the public composition/lifecycle bundle for CLI and FastAPI. Its
+`RuntimeResources` registry closes owned resources at most once in reverse registration order,
+allows same-closing-thread re-entry, makes other closing threads wait for the cached terminal result,
+and exposes only safe `resource_name` / `error_type` failures.
+
+`EmbeddingProviderRuntime(provider, close)` is the Embedding Factory ownership bundle. Business
+consumers receive only the bounded/synchronized `provider`; composition roots retain and close the
+bundle. In v0.1, `AEMEATH_RUNTIME_MAX_EMBEDDING_REQUESTS` must equal `1`.
+
+FastAPI applies `ApiRateLimiterPort` only after authentication on `/v1/chat`. A rejected request maps
+to `API_RATE_LIMITED` / HTTP 429 with an integer `Retry-After`. `RUNTIME_BUSY` maps to HTTP 503.
+Neither contract stores raw IP, request body, query, vector, credential, or Provider response data.
 
 ## Auth / Account / Permission Interfaces
 
@@ -1132,6 +1174,7 @@ Current implementations:
 
 - `NoopAppLogger`
 - `JsonlAppLogger`
+- `SafeAppLogger` as the runtime best-effort wrapper
 
 Runtime configuration:
 
@@ -1144,6 +1187,8 @@ Boundary:
 - `DialogueController` is not injected with `AppLoggerPort` in v0.1.
 - App log payloads must reuse `app.errors.redact_sensitive(...)`.
 - App logs should not store full prompts, full model messages, or raw provider responses.
+- Runtime trace sinks are wrapped by `SafeTraceLogger`; prompt-run logging remains fail-loud and is
+  not wrapped by a safe logger.
 
 ## State Update Contract
 

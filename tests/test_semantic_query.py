@@ -19,6 +19,7 @@ from app.embeddings.providers.hash import DeterministicHashEmbeddingProvider
 from app.embeddings.schemas import EmbeddingBatchResult, EmbeddingRequest
 from app.embeddings.synchronized import SynchronizedEmbeddingProvider
 from app.errors import ErrorCode
+from app.runtime.guardrails.concurrency import ConcurrencyGate, LimitedEmbeddingProvider
 from app.semantic.budget import load_semantic_query_budget
 from app.semantic.coordinator import SemanticQueryCoordinator
 from app.semantic.errors import (
@@ -390,6 +391,13 @@ def test_coordinator_duration_includes_state_lock_wait() -> None:
         def __exit__(self, exc_type, exc_value, traceback) -> None:
             self.inner.release()
 
+        def acquire(self, *, timeout: float) -> bool:
+            lock_attempted.set()
+            return self.inner.acquire(timeout=timeout)
+
+        def release(self) -> None:
+            self.inner.release()
+
     ticks = iter((10.0, 15.0))
     provider = _CountingProvider()
     coordinator = SemanticQueryCoordinator(
@@ -414,6 +422,58 @@ def test_coordinator_duration_includes_state_lock_wait() -> None:
 
     assert not worker.is_alive()
     assert contexts[0].duration_ms == 5000.0
+
+
+def test_state_lock_capacity_timeout_returns_failed_context_without_provider_call() -> None:
+    class _UnavailableLock:
+        def acquire(self, *, timeout: float) -> bool:
+            assert timeout == 0.01
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("an unavailable lock must not be released")
+
+    provider = _CountingProvider()
+    coordinator = SemanticQueryCoordinator(
+        provider=provider,
+        active_roles=("memory_recall",),
+        state_wait_timeout_seconds=0.01,
+    )
+    coordinator._state_lock = _UnavailableLock()
+
+    context = coordinator.prepare_turn_context(turn_input=_turn())
+
+    resolution = context.resolutions[0]
+    assert context.status == "failed"
+    assert context.provider_called is False
+    assert context.unique_query_count == 0
+    assert resolution.reason_code == "embedding_local_capacity"
+    assert resolution.error_code == ErrorCode.RUNTIME_BUSY.value
+    assert provider.requests == []
+
+
+def test_embedding_gate_capacity_timeout_returns_failed_context_without_delegate_call() -> None:
+    provider = _CountingProvider()
+    gate = ConcurrencyGate(
+        limit=1,
+        wait_timeout_seconds=0,
+        reason="embedding_concurrency",
+    )
+    coordinator = SemanticQueryCoordinator(
+        provider=LimitedEmbeddingProvider(gate=gate, delegate=provider),
+        active_roles=("memory_recall",),
+    )
+
+    with gate.acquire():
+        context = coordinator.prepare_turn_context(turn_input=_turn())
+
+    resolution = context.resolutions[0]
+    assert context.status == "failed"
+    assert context.provider_called is False
+    assert context.unique_query_count == 0
+    assert resolution.reason_code == "embedding_local_capacity"
+    assert resolution.error_code == ErrorCode.RUNTIME_BUSY.value
+    assert provider.requests == []
 
 
 def test_two_concurrent_turns_do_not_cross_query_vectors() -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.main import build_controller
+from app.main import build_application_runtime
 
 
 @pytest.fixture()
@@ -35,12 +35,18 @@ def settings(tmp_path: Path) -> Settings:
 
 @pytest.fixture()
 def controller_and_store(settings: Settings):
-    controller, _memory_admin, resolved_settings, store = build_controller(settings=settings)
-    return controller, store, resolved_settings
+    runtime = build_application_runtime(settings=settings, surface="cli")
+    try:
+        yield runtime.agent_service.controller, runtime.store, runtime.settings
+    finally:
+        runtime.close()
 
 
 @pytest.fixture()
 def long_term_memory_controller_and_store(settings: Settings):
     settings = replace(settings, enable_long_term_memory=True)
-    controller, _memory_admin, resolved_settings, store = build_controller(settings=settings)
-    return controller, store, resolved_settings
+    runtime = build_application_runtime(settings=settings, surface="cli")
+    try:
+        yield runtime.agent_service.controller, runtime.store, runtime.settings
+    finally:
+        runtime.close()

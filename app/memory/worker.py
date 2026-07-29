@@ -5,21 +5,27 @@ from dataclasses import dataclass
 
 from app.config import Settings
 from app.db.store_factory import StoreFacade, create_store
+from app.embeddings.synchronized import SynchronizedEmbeddingProvider
 from app.errors import map_exception
 from app.memory.extractor import MemoryExtractionService
 from app.memory.mock_extractor import MockMemoryExtractionModelClient
 from app.memory.observability import record_memory_event
 from app.memory.repair import MemoryEmbeddingRepairService
-from app.memory.runtime import build_memory_embedding_provider
+from app.memory.runtime import build_memory_embedding_runtime
 from app.memory.schemas import (
     MemoryEmbeddingArtifactGapCursor,
     MemoryEmbeddingRepairResult,
 )
-from app.model.deepseek import DeepSeekClient, FallbackChatModelClient
-from app.model.mock import MockChatModelClient
+from app.model.deepseek import DeepSeekClient
 from app.observability.noop import NoopAppLogger
 from app.observability.ports import AppLoggerPort
 from app.observability.runtime import create_app_logger
+from app.runtime.guardrails.concurrency import (
+    ConcurrencyGate,
+    LimitedChatModelClient,
+    LimitedEmbeddingProvider,
+)
+from app.runtime.resources import RuntimeResources
 from app.schemas import MessageRecord
 from app.utils.ids import new_id
 
@@ -50,17 +56,45 @@ class MemoryRepairSchedule:
         return delay
 
 
-def _build_model_client(settings: Settings):
+def _build_model_client(
+    settings: Settings,
+    *,
+    gate: ConcurrencyGate,
+    resources: RuntimeResources,
+    app_logger: AppLoggerPort,
+):
     if settings.use_mock_llm:
-        return MockChatModelClient()
+        return LimitedChatModelClient(
+            gate=gate,
+            delegate=MockMemoryExtractionModelClient(),
+            purpose="memory_extraction",
+            app_logger=app_logger,
+        )
     deepseek_client = DeepSeekClient(
         api_key=settings.deepseek_api_key or "",
         base_url=settings.deepseek_base_url,
         model=settings.aemeath_model,
         thinking=settings.deepseek_thinking,
         reasoning_effort=settings.deepseek_reasoning_effort,
+        connect_timeout_seconds=settings.deepseek_connect_timeout_seconds,
+        read_timeout_seconds=settings.deepseek_read_timeout_seconds,
+        write_timeout_seconds=settings.deepseek_write_timeout_seconds,
+        pool_timeout_seconds=settings.deepseek_pool_timeout_seconds,
+        max_retries=settings.deepseek_max_retries,
+        retry_backoff_seconds=settings.deepseek_retry_backoff_seconds,
+        retry_backoff_max_seconds=settings.deepseek_retry_backoff_max_seconds,
+        retry_after_max_seconds=settings.deepseek_retry_after_max_seconds,
+        max_output_tokens=settings.deepseek_max_output_tokens,
+        max_connections=settings.runtime_llm_max_concurrency,
+        app_logger=app_logger,
     )
-    return FallbackChatModelClient(primary=deepseek_client, fallback=MockChatModelClient())
+    resources.register(name="deepseek_client", close=deepseek_client.close)
+    return LimitedChatModelClient(
+        gate=gate,
+        delegate=deepseek_client,
+        purpose="memory_extraction",
+        app_logger=app_logger,
+    )
 
 
 def _messages_for_job(store: StoreFacade, job) -> list[MessageRecord]:
@@ -169,17 +203,47 @@ def run_worker(settings: Settings | None = None) -> int:
         print("[memory worker] long-term memory is disabled")
         return 0
 
+    resources = RuntimeResources()
+    try:
+        return _run_worker_active(settings, app_logger=app_logger, resources=resources)
+    finally:
+        resources.close()
+
+
+def _run_worker_active(
+    settings: Settings,
+    *,
+    app_logger: AppLoggerPort,
+    resources: RuntimeResources,
+) -> int:
+
     store = create_store(db_path=settings.db_path, backend=settings.db_backend)
-    embedding_provider = build_memory_embedding_provider(
+    embedding_runtime = build_memory_embedding_runtime(
         settings,
         app_logger=app_logger,
     )
+    resources.register(name="embedding_provider", close=embedding_runtime.close)
+    embedding_provider = LimitedEmbeddingProvider(
+        gate=ConcurrencyGate(
+            limit=settings.runtime_embedding_max_concurrency,
+            wait_timeout_seconds=settings.runtime_embedding_wait_timeout_seconds,
+            reason="embedding_concurrency",
+        ),
+        delegate=SynchronizedEmbeddingProvider(embedding_runtime.provider),
+        app_logger=app_logger,
+    )
+    llm_gate = ConcurrencyGate(
+        limit=settings.runtime_llm_max_concurrency,
+        wait_timeout_seconds=settings.runtime_llm_wait_timeout_seconds,
+        reason="llm_concurrency",
+    )
     extraction_service = MemoryExtractionService(
         store=store,
-        model_client=(
-            MockMemoryExtractionModelClient()
-            if settings.use_mock_llm
-            else _build_model_client(settings)
+        model_client=_build_model_client(
+            settings,
+            gate=llm_gate,
+            resources=resources,
+            app_logger=app_logger,
         ),
         embedding_provider=embedding_provider,
         app_logger=app_logger,

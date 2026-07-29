@@ -5,6 +5,8 @@ from app.errors.codes import ErrorCode
 
 _HTTP_STATUS_BY_CODE = {
     ErrorCode.INVALID_INPUT: 400,
+    ErrorCode.RUNTIME_BUSY: 503,
+    ErrorCode.API_RATE_LIMITED: 429,
     ErrorCode.AUTH_REQUIRED: 401,
     ErrorCode.AUTH_INVALID_CREDENTIALS: 401,
     ErrorCode.AUTH_ACCOUNT_DISABLED: 403,

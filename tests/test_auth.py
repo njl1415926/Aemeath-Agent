@@ -22,9 +22,8 @@ def test_dev_token_resolves_to_user_context(settings):
         dev_auth_token="correct-dev-token",
         dev_auth_user_id="user_default",
     )
-    _service, _memory_admin, _resolved_settings, store = build_agent_service(
-        settings=service_settings
-    )
+    runtime = build_agent_service(settings=service_settings)
+    store = runtime.store
     auth_service = AuthService(AccountService(store))
 
     user_context = auth_service.resolve_bearer_token(
@@ -53,16 +52,14 @@ def test_unset_dev_token_revokes_previously_stored_token(settings, db_backend: s
         dev_auth_token="old-dev-token",
         dev_auth_user_id="revoked_user",
     )
-    _service, _memory_admin, _resolved_settings, store = build_agent_service(
-        settings=token_settings
-    )
+    runtime = build_agent_service(settings=token_settings)
+    store = runtime.store
     auth_service = AuthService(AccountService(store))
     assert auth_service.resolve_bearer_token("old-dev-token").user_id == "revoked_user"
 
     revoked_settings = replace(token_settings, dev_auth_token=None)
-    _service, _memory_admin, _resolved_settings, revoked_store = build_agent_service(
-        settings=revoked_settings
-    )
+    revoked_runtime = build_agent_service(settings=revoked_settings)
+    revoked_store = revoked_runtime.store
     revoked_auth_service = AuthService(AccountService(revoked_store))
 
     with pytest.raises(AuthInvalidCredentialsError):
@@ -75,9 +72,8 @@ def test_unset_dev_token_revokes_previously_stored_token(settings, db_backend: s
 
 def test_wrong_or_missing_dev_token_maps_to_auth_errors(settings):
     service_settings = replace(settings, dev_auth_token="correct-dev-token")
-    _service, _memory_admin, _resolved_settings, store = build_agent_service(
-        settings=service_settings
-    )
+    runtime = build_agent_service(settings=service_settings)
+    store = runtime.store
     auth_service = AuthService(AccountService(store))
 
     with pytest.raises(AuthInvalidCredentialsError) as wrong:
@@ -97,7 +93,8 @@ def test_wrong_or_missing_dev_token_maps_to_auth_errors(settings):
 
 
 def test_disabled_account_cannot_resolve_user_context(settings):
-    _service, _memory_admin, _resolved_settings, store = build_agent_service(settings=settings)
+    runtime = build_agent_service(settings=settings)
+    store = runtime.store
     account_service = AccountService(store)
     account_service.ensure_account(account_id="disabled_user")
     store.set_account_dev_token_hash(
@@ -118,7 +115,8 @@ def test_disabled_account_cannot_resolve_user_context(settings):
 
 
 def test_local_default_account_resolver(settings):
-    _service, _memory_admin, _resolved_settings, store = build_agent_service(settings=settings)
+    runtime = build_agent_service(settings=settings)
+    store = runtime.store
     resolver = LocalDefaultAccountResolver(
         account_service=AccountService(store),
         default_user_id="user_default",

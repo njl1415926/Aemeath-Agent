@@ -191,7 +191,13 @@ def test_memory_extraction_service_rejects_malformed_json(controller_and_store):
 
 def test_mock_memory_extraction_model_supports_manual_extract(settings):
     settings = replace(settings, enable_long_term_memory=True)
-    controller, memory_admin, resolved_settings, store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller = runtime.agent_service.controller
+    memory_admin, resolved_settings, store = (
+        runtime.memory_admin_service,
+        runtime.settings,
+        runtime.store,
+    )
     store.ensure_session(
         session_id="session_mock",
         user_id=resolved_settings.default_user_id,
@@ -257,7 +263,12 @@ def test_window_extraction_can_be_disabled(settings):
         enable_long_term_memory=True,
         enable_memory_window_extraction=False,
     )
-    controller, _memory_admin, resolved_settings, store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, resolved_settings, store = (
+        runtime.agent_service.controller,
+        runtime.settings,
+        runtime.store,
+    )
     session_id = new_id("session")
 
     for index in range(6):
@@ -281,7 +292,12 @@ def test_prompt_log_records_injected_memory_ids(settings):
         enable_prompt_run_log=True,
         prompt_run_log_root=settings.db_path.parent / ".aemeath" / "sessions",
     )
-    controller, _memory_admin, resolved_settings, store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, resolved_settings, store = (
+        runtime.agent_service.controller,
+        runtime.settings,
+        runtime.store,
+    )
     memory_id = store.create_memory(
         user_id=resolved_settings.default_user_id,
         scope="user_global",

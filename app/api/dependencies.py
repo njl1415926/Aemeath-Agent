@@ -10,7 +10,12 @@ from app.auth.errors import AuthRequiredError
 from app.auth.service import AuthService, LocalDefaultAccountResolver
 from app.config import Settings
 from app.db.store_factory import StoreFacade
+from app.errors import redact_sensitive
 from app.observability.ports import AppLoggerPort
+from app.observability.schemas import AppLogRecord
+from app.runtime.guardrails.errors import ApiRateLimitedError
+from app.runtime.guardrails.ports import ApiRateLimiterPort
+from app.runtime.guardrails.schemas import ApiRateLimitRequest
 from app.services.agent_service import AgentService
 from app.services.schemas import UserContext
 from app.services.session_service import SessionService
@@ -25,6 +30,7 @@ class ApiRuntime:
     settings: Settings
     store: StoreFacade
     app_logger: AppLoggerPort
+    rate_limiter: ApiRateLimiterPort
 
 
 def build_api_runtime(
@@ -32,6 +38,7 @@ def build_api_runtime(
     agent_service: AgentService,
     settings: Settings,
     store: StoreFacade,
+    rate_limiter: ApiRateLimiterPort,
 ) -> ApiRuntime:
     account_service = AccountService(store)
     return ApiRuntime(
@@ -45,6 +52,7 @@ def build_api_runtime(
         settings=settings,
         store=store,
         app_logger=agent_service.app_logger,
+        rate_limiter=rate_limiter,
     )
 
 
@@ -81,4 +89,47 @@ def get_user_context(
     else:
         raise AuthRequiredError()
     request.state.user_id = user_context.user_id
+    return user_context
+
+
+def get_rate_limited_user_context(
+    request: Request,
+    user_context: UserContext = Depends(get_user_context),
+    runtime: ApiRuntime = Depends(get_runtime),
+) -> UserContext:
+    decision = runtime.rate_limiter.check(
+        request=ApiRateLimitRequest(
+            user_id=user_context.user_id,
+            ip_key=request.client.host if request.client is not None else None,
+        )
+    )
+    if not decision.allowed:
+        request.state.limit_reason = decision.reason_code
+        runtime.app_logger.record(
+            AppLogRecord(
+                event_name="api.chat_rate_limited",
+                level="warning",
+                request_id=user_context.request_id,
+                user_id=user_context.user_id,
+                error_code="API_RATE_LIMITED",
+                payload=redact_sensitive(
+                    {
+                        "limit_reason": decision.reason_code,
+                        "retry_after_seconds": decision.retry_after_seconds,
+                    }
+                ),
+            )
+        )
+        raise ApiRateLimitedError(
+            decision.reason_code,
+            retry_after_seconds=decision.retry_after_seconds,
+        )
+    runtime.app_logger.record(
+        AppLogRecord(
+            event_name="api.chat_rate_accepted",
+            request_id=user_context.request_id,
+            user_id=user_context.user_id,
+            payload={"status": "accepted"},
+        )
+    )
     return user_context

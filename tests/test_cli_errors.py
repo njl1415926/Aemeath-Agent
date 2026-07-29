@@ -32,8 +32,14 @@ def test_cli_turn_failure_prints_stable_error_code(monkeypatch, capsys):
 
     monkeypatch.setattr(
         cli,
-        "build_agent_service",
-        lambda: (_FailingAgentService(), None, settings, _FakeStore()),
+        "build_application_runtime",
+        lambda *, surface: SimpleNamespace(
+            agent_service=_FailingAgentService(),
+            memory_admin_service=None,
+            settings=settings,
+            store=_FakeStore(),
+            close=lambda: (),
+        ),
     )
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
 

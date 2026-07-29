@@ -11,6 +11,7 @@ import pytest
 from app.embeddings import qualify
 from app.embeddings.errors import EmbeddingQualificationError
 from app.embeddings.fingerprints import expected_qualification_fingerprint
+from app.embeddings.runtime import EmbeddingProviderRuntime
 from app.embeddings.schemas import (
     CanaryItem,
     CanarySet,
@@ -33,6 +34,10 @@ QUALIFICATION_PAYLOAD_FIELDS = {
     "signature_fingerprint",
     "duration_ms",
 }
+
+
+def _provider_runtime(provider) -> EmbeddingProviderRuntime:
+    return EmbeddingProviderRuntime(provider=provider, _close=lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -162,7 +167,7 @@ def test_capture_candidate_cli_writes_safe_files_without_network(
     monkeypatch.setattr(
         qualify,
         "create_qualification_provider",
-        lambda selected, runtime, *, app_logger=None: provider,
+        lambda selected, runtime, *, app_logger=None: _provider_runtime(provider),
     )
 
     exit_code = qualify.main(
@@ -205,7 +210,7 @@ def test_verify_cli_accepts_review_profile_with_committed_baseline(
     monkeypatch.setattr(
         qualify,
         "create_qualification_provider",
-        lambda selected, runtime, *, app_logger=None: provider,
+        lambda selected, runtime, *, app_logger=None: _provider_runtime(provider),
     )
 
     exit_code = qualify.main(["verify", "--profile", profile.profile_id])
@@ -303,7 +308,7 @@ def test_verify_records_one_completed_terminal_with_exact_safe_payload(
 
     def create_provider(selected, runtime, *, app_logger=None):
         factory_loggers.append(app_logger)
-        return provider
+        return _provider_runtime(provider)
 
     monkeypatch.setenv("SILICONFLOW_API_KEY", SENTINEL)
     monkeypatch.setattr(qualify, "load_profile_for_qualification", lambda profile_id: profile)
@@ -364,7 +369,7 @@ def test_verify_probe_false_records_one_failed_terminal(monkeypatch, capsys) -> 
     monkeypatch.setattr(
         qualify,
         "create_qualification_provider",
-        lambda selected, runtime, *, app_logger=None: provider,
+        lambda selected, runtime, *, app_logger=None: _provider_runtime(provider),
     )
 
     exit_code = qualify.main(
@@ -437,7 +442,7 @@ def test_capture_nested_probe_records_only_one_qualification_terminal(
 
     def create_provider(selected, runtime, *, app_logger=None):
         factory_loggers.append(app_logger)
-        return provider
+        return _provider_runtime(provider)
 
     monkeypatch.setattr(qualify, "load_profile_for_qualification", lambda profile_id: profile)
     monkeypatch.setattr(qualify, "load_canary_set", lambda selected: _canaries())
@@ -479,7 +484,7 @@ def test_qualification_logger_failure_does_not_change_success(
 
     def create_provider(selected, runtime, *, app_logger=None):
         factory_loggers.append(app_logger)
-        return provider
+        return _provider_runtime(provider)
 
     monkeypatch.setattr(qualify, "load_profile_for_qualification", lambda profile_id: profile)
     monkeypatch.setattr(qualify, "load_canary_set", lambda selected: _canaries())
@@ -512,7 +517,7 @@ def test_batch_size_one_is_provider_chunk_size_not_logical_probe_limit(
 
     def create_provider(selected, runtime, *, app_logger=None):
         observed_runtime_batch_sizes.append(runtime.batch_size)
-        return provider
+        return _provider_runtime(provider)
 
     monkeypatch.setattr(qualify, "load_profile_for_qualification", lambda profile_id: profile)
     monkeypatch.setattr(qualify, "load_canary_set", lambda selected: _canaries())

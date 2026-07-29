@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from uuid import uuid4
 
 from app.errors.sanitizer import redact_sensitive
@@ -20,11 +21,13 @@ class JsonlAppLogger:
             / f"{now:%d}"
             / f"app-{now:%Y-%m-%dT%H-%M-%S}-{uuid4().hex[:12]}.jsonl"
         )
+        self._write_lock = Lock()
 
     def record(self, record: AppLogRecord) -> None:
         payload = asdict(record)
         payload["payload"] = redact_sensitive(payload.get("payload", {}))
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.log_path.open("a", encoding="utf-8") as file:
-            json.dump(payload, file, ensure_ascii=False)
-            file.write("\n")
+        line = json.dumps(payload, ensure_ascii=False) + "\n"
+        with self._write_lock:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as file:
+                file.write(line)

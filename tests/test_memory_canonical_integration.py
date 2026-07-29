@@ -641,7 +641,7 @@ def test_reader_prefers_shared_semantic_vector_without_direct_provider_call(
     }
 
 
-def test_reader_records_ready_vector_as_unused_for_low_information_input(
+def test_reader_skips_vector_and_usage_event_for_low_information_input(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "reader_shared_unused.db")
@@ -651,6 +651,8 @@ def test_reader_records_ready_vector_as_unused_for_low_information_input(
         provider=provider,
         active_roles=("memory_recall",),
     ).prepare_turn_context(turn_input=_semantic_turn("你好", turn_id="turn_unused"))
+    assert context.status == "skipped"
+    assert context.provider_called is False
     provider.requests.clear()
     reader = MemoryReader(store, embedding_provider=provider, app_logger=logger)
 
@@ -666,10 +668,7 @@ def test_reader_records_ready_vector_as_unused_for_low_information_input(
 
     assert results == []
     assert provider.requests == []
-    assert logger.records[-1].event_name == "memory.semantic_query_usage"
-    assert logger.records[-1].turn_id == "turn_unused"
-    assert logger.records[-1].payload["semantic_vector_consumed"] is False
-    assert logger.records[-1].payload["semantic_usage_reason"] == "low_information_input"
+    assert logger.records == []
 
 
 def test_reader_failed_semantic_context_uses_keyword_without_direct_retry(

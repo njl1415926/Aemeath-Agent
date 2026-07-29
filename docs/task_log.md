@@ -2001,3 +2001,36 @@ Validation:
 - Full project regression: 437 passed.
 - Ruff, compileall, wheel resource packaging, and diff checks passed. Details are recorded in
   `docs/agents_communication/siliconflow_bge_m3_profile_approval_delivery.md`.
+
+### T-0139 Runtime Guardrails v0.1
+
+Status: `done`
+
+Owner:
+- Worker Session 16; final acceptance by Manager Session.
+
+Goal:
+- Add the minimum single-process admission, cost, transport, lifecycle, and safe-observability
+  controls needed before a small FastAPI deployment without adding policy to `DialogueController`.
+
+Delivery:
+- Added `(user_id, session_id)` serialization plus bounded dialogue, shared LLM, and single-slot
+  Embedding concurrency gates.
+- Added authenticated FastAPI user/IP token buckets with bounded LRU cleanup, stable `429`, and the
+  longest applicable `Retry-After`.
+- Added pre-persistence message/metadata limits, persistent DeepSeek HTTP transport with phase
+  timeouts, bounded retries/output, and CLI-dialogue-only fallback isolation.
+- Added explicit `ApplicationRuntime`, `RuntimeResources`, and `EmbeddingProviderRuntime` ownership;
+  FastAPI, CLI, Memory Worker, qualification, and RAG tooling close owned resources deterministically.
+- Made App/Trace logging best effort and all JSONL writers safe for concurrent lines while preserving
+  Prompt Log's fail-loud behavior.
+- Documented the single-process and trusted-proxy deployment boundary; distributed rate limits and
+  multi-worker coordination remain deferred.
+
+Manager acceptance:
+- Initial review found close re-entry deadlocks, incorrect dual-bucket `Retry-After`, unbounded bucket
+  sweeping, an invalid configurable Embedding concurrency path, and a missing keepalive setting.
+- All five corrections were implemented and covered by focused fault-injection tests.
+- Final independent validation on 2026-07-29: 43 focused tests and 506 full-project tests passed;
+  `ruff check app tests`, `python -m compileall -q app tests`, and `git diff --check` passed. Only the
+  existing Starlette, legacy Embedding configuration, and Python 3.12 SQLite warnings remain.

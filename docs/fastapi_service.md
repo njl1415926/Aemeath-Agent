@@ -15,8 +15,9 @@ logging.
 
 ## Runtime
 
-`app.api.server.create_app(settings: Settings | None = None)` builds the runtime with
-`build_agent_service(...)`, then constructs API dependencies around the same store and app logger.
+`app.api.server.create_app(settings: Settings | None = None)` builds one explicit
+`ApplicationRuntime` with `surface="api"`. FastAPI lifespan closes its owned DeepSeek and
+Embedding resources exactly once; adapters never inspect Controller or wrapper internals.
 
 Run locally with:
 
@@ -24,6 +25,13 @@ Run locally with:
 pip install -e .[dev,api]
 uvicorn app.api.server:create_app --factory --host 127.0.0.1 --port 8000
 ```
+
+Runtime Guardrails v0.1 is process-local. Production must run exactly one Uvicorn worker. A
+multi-worker launch gives each process independent Session locks, concurrency limits, and rate
+buckets and is therefore outside the v0.1 guarantee.
+
+`AEMEATH_RUNTIME_MAX_EMBEDDING_REQUESTS` must remain exactly `1` in v0.1. The inner synchronized
+Embedding adapter is intentionally serial and does not provide a second bounded queue.
 
 ## Auth
 
@@ -56,6 +64,24 @@ on startup, the configured `AEMEATH_DEV_AUTH_USER_ID` has its stored `dev_token_
 API model fallback is disabled by default. Provider auth, rate-limit, timeout, unavailable, or
 invalid-response failures should surface through the shared API error shape instead of returning a
 mock fallback response. CLI runtime keeps model fallback enabled by default for local continuity.
+Setting `AEMEATH_API_ENABLE_MODEL_FALLBACK=true` is rejected as `CONFIG_INVALID`.
+
+## Runtime limits
+
+`POST /v1/chat` is limited after authentication by an in-process user token bucket and an
+auxiliary client-IP bucket. The defaults are `12/minute, burst 4` per user and `60/minute, burst
+20` per IP. Rejections return `API_RATE_LIMITED` (HTTP 429) with integer `Retry-After`. CLI does
+not pass through this HTTP limiter.
+
+The shared `AgentService` rejects messages over 4,000 characters or 12,000 UTF-8 bytes and
+metadata whose deterministic JSON encoding exceeds 8,192 UTF-8 bytes. These checks happen before
+message persistence and provider calls. They do not limit the raw HTTP body before JSON parsing.
+Production must configure a reverse-proxy request-body limit with suitable JSON/envelope headroom.
+
+The deployment may use Uvicorn proxy-header processing only for explicitly enumerated trusted
+proxy addresses. Do not use `--forwarded-allow-ips="*"`; when there is no trusted proxy, disable
+proxy headers. `request.client.host` after that deployment boundary is the auxiliary IP-rate key
+and is never written to logs.
 
 ## Endpoints
 
@@ -94,7 +120,9 @@ not exposed.
 
 ## Logging
 
-`X-Request-ID` is accepted and written back. If missing, the API generates `req_<id>`.
+`X-Request-ID` is accepted only when it matches
+`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`. Missing or invalid values are replaced with a generated
+`req_<id>`; the invalid original is neither echoed nor logged.
 The request id is passed through `UserContext` and added to turn metadata so trace/prompt metadata
 can be correlated with API app logs.
 

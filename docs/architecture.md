@@ -7,8 +7,11 @@ long-term Memory to explicit runtime systems:
 
 ```text
 CLI / FastAPI
-  -> SessionStorePort
-  -> DialogueController
+  -> Auth / API rate limit (HTTP only)
+  -> AgentService
+       -> input cost policy
+       -> (user_id, session_id) admission + dialogue concurrency gate
+       -> DialogueController
        -> CharacterProviderPort
        -> SemanticQueryCoordinatorPort
        -> MemoryReaderPort / MemoryWriterPort
@@ -102,6 +105,30 @@ token overflow; document embedding keeps its existing truncating behavior.
 The current composition root activates only the `memory_recall` semantic role. World Info receives
 the optional context but intentionally ignores it, Character example selection is unchanged, and
 managed canonical RAG remains tooling-only until a separately approved runtime integration task.
+
+## 2026-07-29 Runtime Guardrails v0.1
+
+T-0139 adds a single-process production-safety boundary without moving policy into
+`DialogueController`:
+
+- `AgentService` validates message/metadata cost limits before persistence, serializes each
+  `(user_id, session_id)`, and applies a bounded global dialogue gate.
+- Provider-neutral wrappers enforce shared LLM and Embedding concurrency limits. The v0.1
+  Embedding limit is fixed at one so the existing synchronized Provider cannot create an unbounded
+  inner queue.
+- FastAPI chat applies authenticated user/IP token buckets and returns stable `429` plus the longest
+  applicable `Retry-After`; CLI does not use this HTTP limiter.
+- `DeepSeekClient` owns one persistent `httpx.Client`, phase-specific timeouts, bounded retry rules,
+  an output-token limit, and the CLI-dialogue-only fallback allowlist. Memory extraction and API
+  paths never receive that fallback wrapper.
+- `ApplicationRuntime` and `RuntimeResources` own runtime-created clients and close them once in
+  reverse order from FastAPI lifespan, CLI `finally`, or Memory Worker `finally`.
+- App/Trace logging is best effort, JSONL writes are instance-serialized, and guardrail events retain
+  only safe counts, ids, durations, statuses, and reason codes.
+
+The implementation is intentionally process-local. Multi-process distributed admission and rate
+limiting remain deferred and must use external coordination before scaling beyond one application
+worker.
 
 ## 2026-07-28 Deterministic Prompt Context Budget
 
@@ -270,7 +297,7 @@ AgentTurnOutput
 
 当前核心入口：
 
-- `build_agent_service()`
+- `build_application_runtime(surface="cli" | "api")`
 - `AgentService.handle_chat()`
 
 ### Auth / Account / Permission Layer
@@ -676,6 +703,7 @@ instead of introducing a separate error taxonomy.
 
 ```text
 app/main.py
+  creates ApplicationRuntime / RuntimeResources
   creates SQLiteStore
   creates CharacterRegistry
   creates WorldInfoEvidenceProvider
@@ -686,7 +714,7 @@ app/main.py
   creates MemoryReader/Writer
   creates ResponseGenerator(ChatModelClient)
   injects all dependencies into DialogueController
-  creates AgentService as the app boundary
+  creates AgentService with input/admission guardrails as the app boundary
 
 AgentService
   accepts UserContext + ChatRequest

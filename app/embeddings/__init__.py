@@ -17,6 +17,7 @@ from app.embeddings.config import (
 from app.embeddings.factory import create_embedding_provider
 from app.embeddings.ports import EmbeddingProviderPort, QueryEmbeddingSourcePort
 from app.embeddings.query import DirectQueryEmbeddingSource
+from app.embeddings.runtime import EmbeddingProviderRuntime
 from app.embeddings.schemas import (
     EmbeddingBatchResult,
     EmbeddingCallDiagnostics,
@@ -38,6 +39,7 @@ __all__ = [
     "EmbeddingCallDiagnostics",
     "EmbeddingModelSignature",
     "EmbeddingProviderPort",
+    "EmbeddingProviderRuntime",
     "QueryEmbeddingSourcePort",
     "EmbeddingRequest",
     "EmbeddingRuntimeOptions",

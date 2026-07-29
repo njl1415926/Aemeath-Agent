@@ -40,7 +40,12 @@ def test_inactive_session_rejects_turn_without_side_effects(settings, lifecycle:
         enable_prompt_run_log=True,
         prompt_run_log_root=settings.db_path.parent / ".aemeath" / "sessions",
     )
-    controller, _memory_admin, resolved_settings, store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, resolved_settings, store = (
+        runtime.agent_service.controller,
+        runtime.settings,
+        runtime.store,
+    )
     session = store.create_session(
         user_id=resolved_settings.default_user_id,
         character_id=resolved_settings.default_character_id,
@@ -121,7 +126,12 @@ def test_resumed_session_history_reaches_prompt_log(settings):
         enable_prompt_run_log=True,
         prompt_run_log_root=settings.db_path.parent / ".aemeath" / "sessions",
     )
-    controller, _memory_admin, resolved_settings, store = build_controller(settings=settings)
+    runtime = build_controller(settings=settings)
+    controller, resolved_settings, store = (
+        runtime.agent_service.controller,
+        runtime.settings,
+        runtime.store,
+    )
     session = store.create_session(
         user_id=resolved_settings.default_user_id,
         character_id=resolved_settings.default_character_id,
