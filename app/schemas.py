@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 MemoryOperation = Literal["create", "update", "merge", "archive", "skip"]
@@ -71,7 +71,7 @@ class RelationshipState:
     familiarity: int = 50
     current_scene: str = "default_chat"
     last_topic: str | None = None
-    updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 @dataclass

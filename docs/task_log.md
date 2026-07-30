@@ -2034,3 +2034,55 @@ Manager acceptance:
 - Final independent validation on 2026-07-29: 43 focused tests and 506 full-project tests passed;
   `ruff check app tests`, `python -m compileall -q app tests`, and `git diff --check` passed. Only the
   existing Starlette, legacy Embedding configuration, and Python 3.12 SQLite warnings remain.
+
+### T-0140 Deployment Readiness v0.1
+
+Status: `pending`
+
+Owner:
+- Worker Session 17 / Deployment Worker; staged review and final acceptance by Manager Session.
+
+Goal:
+- Deliver the smallest Ubuntu 22.04 single-ECS, single-user closed-test deployment for the existing
+  FastAPI service without changing `DialogueController`, Character, Memory, RAG, or active Evidence
+  behavior.
+
+Approved scope:
+- API-only first release using Docker Compose, Caddy, one Uvicorn worker, `sqlite_raw`, HTTPS static
+  Bearer auth, Context Budget enabled, empty CORS, and no Memory Worker or SiliconFlow mount.
+- Add reproducible non-root image assets, production configuration and file-secret contracts,
+  bounded readiness adapters, ingress controls, online SQLite backup/restore, log retention, and WSL2
+  plus ECS staging gates.
+- Keep `AEMEATH_ENABLE_LONG_TERM_MEMORY=false`. Enabling the Memory Worker requires separately
+  approved SQLite dual-backend WAL/busy-timeout and fenced job lease/stale-recovery work.
+
+Manager design acceptance:
+- `docs/agents_communication/deployment_readiness_v0_1_design.md` was approved on 2026-07-29 after
+  lifecycle, readiness, WAL-sidecar restore, secret-file, and Worker-gating corrections.
+- Implementation must proceed by D1-D8 checkpoints. D5 remains outside the API-only critical path and
+  cannot start until its two focused designs receive separate Manager approval.
+- The design-stage `506 passed` result is only the prior regression baseline; implementation requires
+  fresh full regression and environment smoke evidence before final acceptance.
+
+Manager WSL review on 2026-07-30:
+- Ubuntu 22.04 WSL2 and Docker Desktop Linux/amd64 became available and the first real D1 build was
+  executed. The unchanged image failed because the Python 3.10 lock omitted the conditional
+  `exceptiongroup` dependency.
+- A temporary WSL-only probe then exposed use of `datetime.UTC`, which is unavailable on the declared
+  Python 3.10 target. The probe passed all remaining preflight, read-only, mount, secret, health,
+  image-content, auth, and SIGTERM checks after temporary diagnostic corrections.
+- D1 therefore remains `Changes Requested`; details and required fixes are recorded in
+  `docs/agents_communication/deployment_readiness_v0_1_wsl_manager_review.md`. T-0140 remains
+  `pending`, and the diagnostic probe is not an accepted release image.
+
+Manager D1 revalidation on 2026-07-30:
+- The Worker added the pinned/hashed Python 3.10 `exceptiongroup` dependency and replaced the two
+  Python 3.11-only `datetime.UTC` uses with `timezone.utc`.
+- Manager rebuilt the official repository image with `--no-cache` for `linux/amd64`; the locked
+  Python 3.10 install, production preflight, non-root/read-only runtime, writable state mounts,
+  `0440` file-secret contract, health/readiness/auth smoke, content/secret scans, and graceful
+  SIGTERM shutdown all passed.
+- Fresh regression evidence: `584 passed, 1 skipped`; Ruff, compileall, lock validation, and
+  `git diff --check` passed. No real Provider call or project `.env` access occurred.
+- D1-D3 are accepted. T-0140 remains `pending`; D4 is authorized to begin, while D5 remains under
+  its separately approved WAL/busy-timeout and fenced lease/stale-recovery gates.

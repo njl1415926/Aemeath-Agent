@@ -1,0 +1,11 @@
+{$AEMEATH_DOMAIN} {
+	route {
+		request_body {
+			max_size 128KiB
+		}
+
+		# As the first hop, Caddy's default reverse_proxy behavior ignores
+		# untrusted inbound X-Forwarded-* values and regenerates them.
+		reverse_proxy {$AEMEATH_API_UPSTREAM:api:8000}
+	}
+}

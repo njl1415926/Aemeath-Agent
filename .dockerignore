@@ -1,0 +1,36 @@
+**
+!Dockerfile
+!requirements.deploy.lock
+!app
+!app/**
+!scripts
+!scripts/deployment
+!scripts/deployment/**
+
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store
+
+# Terminal deny rules take precedence over the allowlist above.  Keep future
+# local state or credentials below app/ and scripts/ out of the build context.
+**/.env
+**/.env.*
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.jsonl
+**/.aemeath
+**/.aemeath/**
+**/.cache
+**/.cache/**
+/app/data
+/app/data/**
+/app/rag_indexes
+/app/rag_indexes/**
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx

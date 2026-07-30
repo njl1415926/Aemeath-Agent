@@ -1,15 +1,38 @@
 from __future__ import annotations
 
+import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
+
+from app.deployment.secrets import (
+    API_BEARER_SECRET_PATH,
+    DEEPSEEK_SECRET_PATH,
+    resolve_secret,
+)
 
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_cors_origins(value: str) -> tuple[str, ...]:
+    if not value.strip():
+        return ()
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("AEMEATH_API_CORS_ALLOWED_ORIGINS must be a JSON array.") from exc
+    if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+        raise ValueError("AEMEATH_API_CORS_ALLOWED_ORIGINS must be a JSON string array.")
+    origins = tuple(parsed)
+    if len(set(origins)) != len(origins):
+        raise ValueError("AEMEATH_API_CORS_ALLOWED_ORIGINS must not contain duplicates.")
+    return origins
 
 
 def _parse_embedding_int(name: str, default: str) -> int:
@@ -32,7 +55,7 @@ def _parse_embedding_float(name: str, default: str) -> float:
 
 @dataclass(frozen=True)
 class Settings:
-    deepseek_api_key: str | None
+    deepseek_api_key: str | None = field(repr=False)
     deepseek_base_url: str
     aemeath_model: str
     deepseek_thinking: str
@@ -63,7 +86,7 @@ class Settings:
     enable_memory_window_extraction: bool = True
     default_user_id: str = "user_default"
     default_character_id: str = "aemeath"
-    dev_auth_token: str | None = None
+    dev_auth_token: str | None = field(default=None, repr=False)
     dev_auth_user_id: str = "user_default"
     api_allow_local_default_user: bool = False
     api_enable_prompt_run_log: bool = False
@@ -109,10 +132,41 @@ class Settings:
     chat_message_max_utf8_bytes: int = 12000
     chat_metadata_max_utf8_bytes: int = 8192
     enable_semantic_low_information_skip: bool = True
+    environment: str = "dev"
+    api_cors_allowed_origins: tuple[str, ...] = ()
+    readiness_timeout_seconds: float = 0.5
+    readiness_db_timeout_seconds: float = 0.2
+    readiness_filesystem_cache_ttl_seconds: float = 5.0
+    readiness_min_free_bytes: int = 64 * 1024 * 1024
+    deployment_app_root: Path = Path("/opt/aemeath")
+    deepseek_api_key_from_file: bool = False
+    dev_auth_token_from_file: bool = False
 
     @staticmethod
     def from_env() -> "Settings":
-        load_dotenv()
+        requested_environment = os.environ.get("AEMEATH_ENVIRONMENT", "dev").strip().lower()
+        if requested_environment == "dev":
+            load_dotenv()
+        environment = os.environ.get("AEMEATH_ENVIRONMENT", "dev").strip().lower()
+        if environment != requested_environment:
+            raise ValueError("AEMEATH_ENVIRONMENT must not be changed by dotenv.")
+        if environment == "prod" and "OPENAI_API_KEY" in os.environ:
+            raise ValueError("OPENAI_API_KEY is not accepted in prod.")
+
+        deepseek_api_key = resolve_secret(
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY_FILE",
+            environment=environment,
+            approved_file_path=DEEPSEEK_SECRET_PATH,
+        )
+        if deepseek_api_key is None and environment != "prod":
+            deepseek_api_key = os.getenv("OPENAI_API_KEY") or None
+        dev_auth_token = resolve_secret(
+            "AEMEATH_DEV_AUTH_TOKEN",
+            "AEMEATH_DEV_AUTH_TOKEN_FILE",
+            environment=environment,
+            approved_file_path=API_BEARER_SECRET_PATH,
+        )
 
         db_path = Path(os.getenv("AEMEATH_DB_PATH", "data/aemeath.db"))
         recent_limit = int(os.getenv("AEMEATH_RECENT_MESSAGE_LIMIT", "12"))
@@ -123,7 +177,7 @@ class Settings:
         )
 
         return Settings(
-            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY"),
+            deepseek_api_key=deepseek_api_key,
             deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             aemeath_model=os.getenv(
                 "DEEPSEEK_MODEL",
@@ -190,7 +244,7 @@ class Settings:
             ),
             default_user_id=os.getenv("AEMEATH_DEFAULT_USER_ID", "user_default"),
             default_character_id=os.getenv("AEMEATH_DEFAULT_CHARACTER_ID", "aemeath"),
-            dev_auth_token=os.getenv("AEMEATH_DEV_AUTH_TOKEN") or None,
+            dev_auth_token=dev_auth_token,
             dev_auth_user_id=os.getenv("AEMEATH_DEV_AUTH_USER_ID", "user_default"),
             api_allow_local_default_user=_parse_bool(
                 os.getenv("AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER", "false")
@@ -319,9 +373,32 @@ class Settings:
             enable_semantic_low_information_skip=_parse_bool(
                 os.getenv("AEMEATH_SEMANTIC_SKIP_LOW_INFORMATION", "true")
             ),
+            environment=environment,
+            api_cors_allowed_origins=_parse_cors_origins(
+                os.getenv("AEMEATH_API_CORS_ALLOWED_ORIGINS", "[]")
+            ),
+            readiness_timeout_seconds=float(
+                os.getenv("AEMEATH_READINESS_TIMEOUT_SECONDS", "0.5")
+            ),
+            readiness_db_timeout_seconds=float(
+                os.getenv("AEMEATH_READINESS_DB_TIMEOUT_SECONDS", "0.2")
+            ),
+            readiness_filesystem_cache_ttl_seconds=float(
+                os.getenv("AEMEATH_READINESS_FILESYSTEM_CACHE_TTL_SECONDS", "5")
+            ),
+            readiness_min_free_bytes=int(
+                os.getenv("AEMEATH_READINESS_MIN_FREE_BYTES", str(64 * 1024 * 1024))
+            ),
+            deployment_app_root=Path(
+                os.getenv("AEMEATH_DEPLOYMENT_APP_ROOT", "/opt/aemeath")
+            ),
+            deepseek_api_key_from_file="DEEPSEEK_API_KEY_FILE" in os.environ,
+            dev_auth_token_from_file="AEMEATH_DEV_AUTH_TOKEN_FILE" in os.environ,
         )
 
     def validate(self) -> None:
+        if self.environment not in {"dev", "test", "prod"}:
+            raise ValueError("AEMEATH_ENVIRONMENT must be dev, test, or prod.")
         if self.db_backend not in {"sqlite_raw", "sqlalchemy"}:
             raise ValueError(
                 "AEMEATH_DB_BACKEND must be either 'sqlite_raw' or 'sqlalchemy'."
@@ -411,6 +488,12 @@ class Settings:
             ("DEEPSEEK_READ_TIMEOUT_SECONDS", self.deepseek_read_timeout_seconds),
             ("DEEPSEEK_WRITE_TIMEOUT_SECONDS", self.deepseek_write_timeout_seconds),
             ("DEEPSEEK_POOL_TIMEOUT_SECONDS", self.deepseek_pool_timeout_seconds),
+            ("AEMEATH_READINESS_TIMEOUT_SECONDS", self.readiness_timeout_seconds),
+            ("AEMEATH_READINESS_DB_TIMEOUT_SECONDS", self.readiness_db_timeout_seconds),
+            (
+                "AEMEATH_READINESS_FILESYSTEM_CACHE_TTL_SECONDS",
+                self.readiness_filesystem_cache_ttl_seconds,
+            ),
         )
         for name, value in positive_floats:
             if not math.isfinite(value) or value <= 0:
@@ -419,9 +502,105 @@ class Settings:
             raise ValueError("DEEPSEEK_MAX_RETRIES must be non-negative.")
         if not 1 <= self.deepseek_max_output_tokens <= 8192:
             raise ValueError("DEEPSEEK_MAX_OUTPUT_TOKENS must be between 1 and 8192.")
+        if self.readiness_db_timeout_seconds > self.readiness_timeout_seconds:
+            raise ValueError(
+                "AEMEATH_READINESS_DB_TIMEOUT_SECONDS must not exceed the total timeout."
+            )
+        if self.readiness_min_free_bytes < 0:
+            raise ValueError("AEMEATH_READINESS_MIN_FREE_BYTES must be non-negative.")
+        self._validate_cors_origins()
+        if self.environment == "prod":
+            self._validate_production()
         if self.use_mock_llm:
             return
         if not self.deepseek_api_key:
             raise ValueError(
                 "DEEPSEEK_API_KEY is required when AEMEATH_USE_MOCK_LLM=false."
             )
+
+    def _validate_cors_origins(self) -> None:
+        for origin in self.api_cors_allowed_origins:
+            parsed = urlsplit(origin)
+            if (
+                origin == "*"
+                or parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("AEMEATH_API_CORS_ALLOWED_ORIGINS contains an invalid origin.")
+            if self.environment == "prod" and parsed.scheme != "https":
+                raise ValueError("Production CORS origins must use HTTPS.")
+
+    def _validate_production(self) -> None:
+        fixed_paths = {
+            "AEMEATH_DB_PATH": (self.db_path, "/var/lib/aemeath/data/aemeath.db"),
+            "AEMEATH_MEMORY_VECTOR_DB_PATH": (
+                self.memory_vector_db_path,
+                "/var/lib/aemeath/data/aemeath_memory.sqlite",
+            ),
+            "AEMEATH_APP_LOG_ROOT": (self.app_log_root, "/var/log/aemeath/app"),
+            "AEMEATH_TRACE_LOG_ROOT": (self.trace_log_root, "/var/log/aemeath/trace"),
+            "AEMEATH_PROMPT_RUN_LOG_ROOT": (
+                self.prompt_run_log_root,
+                "/var/log/aemeath/prompt",
+            ),
+            "AEMEATH_DEPLOYMENT_APP_ROOT": (self.deployment_app_root, "/opt/aemeath"),
+        }
+        for name, (actual, expected) in fixed_paths.items():
+            if actual.as_posix() != expected:
+                raise ValueError(f"{name} must use the approved production path.")
+        if self.db_backend != "sqlite_raw":
+            raise ValueError("AEMEATH_DB_BACKEND must be sqlite_raw in prod.")
+        if self.use_mock_llm:
+            raise ValueError("AEMEATH_USE_MOCK_LLM must be false in prod.")
+        if self.enable_model_fallback or self.api_enable_model_fallback:
+            raise ValueError("Model fallback must be disabled in prod.")
+        if self.api_allow_local_default_user:
+            raise ValueError("AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER must be false in prod.")
+        if self.enable_long_term_memory:
+            raise ValueError("AEMEATH_ENABLE_LONG_TERM_MEMORY must be false in prod v0.1.")
+        if (
+            self.embedding_profile is not None
+            or self.memory_embedding_provider is not None
+            or self.embedding_allow_hash
+        ):
+            raise ValueError("Embedding providers must remain disabled in prod v0.1.")
+        if not self.enable_context_budget:
+            raise ValueError("AEMEATH_ENABLE_CONTEXT_BUDGET must be true in prod.")
+        if self.enable_prompt_run_log or self.api_enable_prompt_run_log:
+            raise ValueError("Prompt run logging must be disabled in prod.")
+        if not self.enable_app_log or not self.enable_trace_log:
+            raise ValueError("App and trace logging must be enabled in prod.")
+        if self.api_cors_allowed_origins:
+            raise ValueError("Production CORS allowlist must be empty in v0.1.")
+        if not self.dev_auth_token:
+            raise ValueError("AEMEATH_DEV_AUTH_TOKEN_FILE is required in prod.")
+        if not self.dev_auth_token_from_file:
+            raise ValueError("AEMEATH_DEV_AUTH_TOKEN must come from its _FILE source in prod.")
+        if (
+            not self.default_user_id
+            or not self.dev_auth_user_id
+            or self.default_user_id == "user_default"
+            or self.dev_auth_user_id == "user_default"
+        ):
+            raise ValueError("Production user IDs must not use user_default.")
+        if self.default_user_id != self.dev_auth_user_id:
+            raise ValueError("Production default and bearer user IDs must match.")
+        if not self.deepseek_api_key:
+            raise ValueError("DEEPSEEK_API_KEY_FILE is required in prod.")
+        if not self.deepseek_api_key_from_file:
+            raise ValueError("DEEPSEEK_API_KEY must come from its _FILE source in prod.")
+        base_url = urlsplit(self.deepseek_base_url)
+        if (
+            base_url.scheme != "https"
+            or not base_url.hostname
+            or base_url.username is not None
+            or base_url.password is not None
+            or base_url.query
+            or base_url.fragment
+        ):
+            raise ValueError("DEEPSEEK_BASE_URL must be an HTTPS origin in prod.")

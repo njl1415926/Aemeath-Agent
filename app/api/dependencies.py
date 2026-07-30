@@ -16,6 +16,7 @@ from app.observability.schemas import AppLogRecord
 from app.runtime.guardrails.errors import ApiRateLimitedError
 from app.runtime.guardrails.ports import ApiRateLimiterPort
 from app.runtime.guardrails.schemas import ApiRateLimitRequest
+from app.runtime.readiness import ReadinessPort
 from app.services.agent_service import AgentService
 from app.services.schemas import UserContext
 from app.services.session_service import SessionService
@@ -58,6 +59,10 @@ def build_api_runtime(
 
 def get_runtime(request: Request) -> ApiRuntime:
     return request.app.state.runtime
+
+
+def get_readiness(request: Request) -> ReadinessPort:
+    return request.app.state.readiness
 
 
 def get_request_id(request: Request) -> str:

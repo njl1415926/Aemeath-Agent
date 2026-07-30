@@ -26,6 +26,12 @@ pip install -e .[dev,api]
 uvicorn app.api.server:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
+The deployment image instead runs `scripts/deployment/start_api.py`. That launcher fixes
+`workers=1`, disables reload and access logs, enables proxy-header processing only for
+`AEMEATH_TRUSTED_PROXY_IPS`, and gives in-flight requests a 60-second graceful shutdown window.
+Production requires exactly one fixed Caddy IP and rejects wildcards, networks, or multiple
+trusted addresses.
+
 Runtime Guardrails v0.1 is process-local. Production must run exactly one Uvicorn worker. A
 multi-worker launch gives each process independent Session locks, concurrency limits, and rate
 buckets and is therefore outside the v0.1 guarantee.
@@ -35,7 +41,8 @@ Embedding adapter is intentionally serial and does not provide a second bounded 
 
 ## Auth
 
-`GET /health` is public. `/v1/*` endpoints require `Authorization: Bearer <dev token>` by default.
+`GET /health` and `GET /ready` are public low-sensitivity probes. `/v1/*` endpoints require
+`Authorization: Bearer <dev token>` by default.
 The raw Authorization header is passed to `AuthService.resolve_bearer_token(...)`; raw tokens are
 not logged or returned.
 
@@ -58,7 +65,10 @@ AEMEATH_API_ENABLE_MODEL_FALLBACK=false
 Prompt logs contain full prompt/messages/sections/response snapshots and should be treated as
 sensitive local debugging artifacts. Enable API prompt logs only for controlled debugging.
 
-`AEMEATH_DEV_AUTH_TOKEN` is treated as the configured dev-token source of truth. When it is unset
+`AEMEATH_DEV_AUTH_TOKEN` is treated as the configured dev-token source of truth in development.
+Production accepts only `AEMEATH_DEV_AUTH_TOKEN_FILE`; the corresponding DeepSeek contract is
+`DEEPSEEK_API_KEY_FILE`. The application, not Compose, implements this `_FILE` convention. It
+rejects dual sources and never includes the resolved value in `Settings` repr or errors. When it is unset
 on startup, the configured `AEMEATH_DEV_AUTH_USER_ID` has its stored `dev_token_hash` cleared.
 
 API model fallback is disabled by default. Provider auth, rate-limit, timeout, unavailable, or
@@ -77,6 +87,8 @@ The shared `AgentService` rejects messages over 4,000 characters or 12,000 UTF-8
 metadata whose deterministic JSON encoding exceeds 8,192 UTF-8 bytes. These checks happen before
 message persistence and provider calls. They do not limit the raw HTTP body before JSON parsing.
 Production must configure a reverse-proxy request-body limit with suitable JSON/envelope headroom.
+The approved D3 Caddy contract sets the raw limit to exactly `128 KiB` before proxying. It remains
+separate from the parsed message and metadata limits.
 
 The deployment may use Uvicorn proxy-header processing only for explicitly enumerated trusted
 proxy addresses. Do not use `--forwarded-allow-ips="*"`; when there is no trusted proxy, disable
@@ -87,11 +99,26 @@ and is never written to logs.
 
 ```text
 GET  /health
+GET  /ready
 POST /v1/chat
 GET  /v1/sessions
 POST /v1/sessions
 GET  /v1/sessions/{session_id}/messages
 ```
+
+`/health` is liveness only and never touches storage or Providers. `/ready` uses an injected narrow
+readiness port: the lifespan-owned state must be `ready`, the configured SQLite file must pass a
+short read-only schema check, and required filesystem roots must pass a cached non-writing
+free-space check. Both `sqlite_raw` and the existing dev/test SQLAlchemy-on-SQLite backend have
+backend-appropriate schema markers; production still permits only `sqlite_raw`. It has a 500 ms
+total deadline, a 200 ms DB budget, and a 5-second filesystem cache by default. Failure is `503`
+with only a stable reason enum. Neither endpoint calls DeepSeek, SiliconFlow, embeddings, or other
+paid Providers; both send `Cache-Control: no-store`.
+
+Production CORS is fixed to the empty list. Dev/test may provide a JSON array through
+`AEMEATH_API_CORS_ALLOWED_ORIGINS`; accepted origins are exact, credentials are disabled, methods
+are limited to `GET, POST, OPTIONS`, and headers are limited to `Authorization, Content-Type,
+X-Request-ID`.
 
 `POST /v1/chat` calls `AgentService.handle_chat(...)`. It does not call `DialogueController`
 directly. If the supplied `session_id` does not exist, v0.1 follows the existing

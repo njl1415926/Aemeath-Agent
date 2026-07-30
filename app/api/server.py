@@ -3,19 +3,29 @@ from __future__ import annotations
 import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 from time import perf_counter
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import build_api_runtime
 from app.api.errors import error_response, register_exception_handlers, validation_error_info
 from app.api.routes import chat, health, sessions
 from app.config import Settings
+from app.db.readiness import build_database_readiness
+from app.deployment.preflight import run_startup_preflight
 from app.errors import map_exception, redact_sensitive
 from app.main import build_application_runtime
 from app.observability.schemas import AppLogRecord
 from app.runtime.guardrails.rate_limit import InProcessApiRateLimiter
+from app.runtime.readiness import (
+    ApplicationReadiness,
+    CachedFilesystemReadinessProbe,
+    LifecycleReadinessState,
+)
+from app.runtime.resources import ApplicationRuntime
 from app.utils.ids import new_id
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
@@ -23,12 +33,21 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    run_startup_preflight(settings)
     api_settings = replace(
         settings,
         enable_prompt_run_log=settings.api_enable_prompt_run_log,
         enable_model_fallback=settings.api_enable_model_fallback,
     )
     application_runtime = build_application_runtime(settings=api_settings, surface="api")
+    try:
+        return _create_app_with_runtime(application_runtime)
+    except BaseException:
+        application_runtime.close()
+        raise
+
+
+def _create_app_with_runtime(application_runtime: ApplicationRuntime) -> FastAPI:
     resolved_settings = application_runtime.settings
     runtime = build_api_runtime(
         agent_service=application_runtime.agent_service,
@@ -42,17 +61,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             idle_ttl_seconds=resolved_settings.api_rate_limit_idle_ttl_seconds,
         ),
     )
+    lifecycle_readiness = LifecycleReadinessState()
+    readiness = ApplicationReadiness(
+        lifecycle=lifecycle_readiness,
+        database=build_database_readiness(
+            backend=resolved_settings.db_backend,
+            db_path=resolved_settings.db_path,
+            timeout_seconds=resolved_settings.readiness_db_timeout_seconds,
+        ),
+        filesystem=CachedFilesystemReadinessProbe(
+            _readiness_filesystem_paths(resolved_settings),
+            min_free_bytes=resolved_settings.readiness_min_free_bytes,
+            cache_ttl_seconds=resolved_settings.readiness_filesystem_cache_ttl_seconds,
+        ),
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        lifecycle_readiness.mark_ready()
         try:
             yield
         finally:
+            lifecycle_readiness.mark_closing()
             application_runtime.close()
 
     app = FastAPI(title="Aemeath Agent API", version="0.1.0", lifespan=lifespan)
     app.state.runtime = runtime
     app.state.application_runtime = application_runtime
+    app.state.readiness = readiness
+    app.state.readiness_timeout_seconds = resolved_settings.readiness_timeout_seconds
+
+    if resolved_settings.api_cors_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(resolved_settings.api_cors_allowed_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+            expose_headers=["X-Request-ID", "Retry-After"],
+        )
 
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next):
@@ -94,6 +141,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(chat.router)
     app.include_router(sessions.router)
     return app
+
+
+def _readiness_filesystem_paths(settings: Settings) -> tuple[Path, ...]:
+    paths = [settings.db_path.parent]
+    if settings.enable_app_log:
+        paths.append(settings.app_log_root)
+    if settings.enable_trace_log:
+        paths.append(settings.trace_log_root)
+    if settings.enable_prompt_run_log:
+        paths.append(settings.prompt_run_log_root)
+    return tuple(paths)
 
 
 def _request_id_from_header(value: str | None) -> str:

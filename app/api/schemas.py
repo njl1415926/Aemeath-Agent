@@ -16,6 +16,19 @@ class HealthResponse(BaseModel):
     service: str
 
 
+class ReadinessResponse(BaseModel):
+    status: Literal["ready", "not_ready"]
+    service: str
+    reason: Literal[
+        "ready",
+        "starting",
+        "closing",
+        "storage_unavailable",
+        "filesystem_unavailable",
+        "check_timeout",
+    ]
+
+
 class ChatRequestBody(BaseModel):
     session_id: str = Field(min_length=1)
     character_id: str = Field(min_length=1)
