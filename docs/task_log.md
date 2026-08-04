@@ -2086,3 +2086,30 @@ Manager D1 revalidation on 2026-07-30:
   `git diff --check` passed. No real Provider call or project `.env` access occurred.
 - D1-D3 are accepted. T-0140 remains `pending`; D4 is authorized to begin, while D5 remains under
   its separately approved WAL/busy-timeout and fenced lease/stale-recovery gates.
+
+Manager D4 review on 2026-07-30:
+- The default API/Caddy topology, non-root/read-only/capability boundary, fixed network and ports,
+  file-secret scope, body limit, disabled profiles, and restart/down-up persistence passed independent
+  WSL Compose smoke. Fresh regression evidence was `592 passed, 1 skipped`; Ruff, compileall, lock
+  validation, and `git diff --check` passed.
+- D4 remains `Changes Requested`: Caddy advertises unreachable HTTP/3 `:8443` while Compose exposes
+  TCP 443 only; proxy health remains healthy while API is stopped and HTTPS returns 502; the runbook
+  installs a root-only env file but shows non-sudo Compose commands that fail with permission denied.
+- Required narrow corrections and reproduction evidence are recorded in
+  `docs/agents_communication/deployment_readiness_v0_1_d4_manager_review.md`. T-0140 remains
+  `pending`; D5-D8 are not authorized by this review.
+
+Manager D4 revalidation on 2026-07-31:
+- The Worker restricted Caddy to h1/h2, extended proxy health to the local Caddy admin endpoint plus
+  provider-free `api:8000/health`, and aligned all production Compose commands with the controlled
+  root/sudo operator contract without weakening env or Secret permissions.
+- Manager rebuilt both linux/amd64 images from the current worktree and independently reproduced:
+  no HTTPS `Alt-Svc`; proxy unhealthy about 67.6 seconds after API stop with HTTPS 502; both services
+  healthy about 16.7 seconds after API restart with HTTPS 200; root-only env denial for the ordinary
+  user and successful root/sudo `compose config -q`.
+- Fresh validation was `594 passed, 1 skipped` and D4 targeted `18 passed, 1 skipped`; Ruff,
+  compileall, deploy lock validation, and `git diff --check` passed. The runbook now allows up to
+  about 75 seconds for the proxy failure gate, accounting for interval, timeout, retries, and phase.
+- D4 is `accepted`. T-0140 remains `pending`; D6 is authorized to begin under the approved staged
+  design. D5 remains blocked on its separately approved WAL/busy-timeout and fenced
+  lease/stale-recovery gates.

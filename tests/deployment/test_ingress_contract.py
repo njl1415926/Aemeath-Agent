@@ -56,6 +56,9 @@ def test_untrusted_client_cannot_spoof_forwarded_ip():
 def test_caddy_contract_has_exact_raw_limit_and_uses_first_hop_forwarding_defaults():
     caddyfile = (ROOT / "deploy" / "Caddyfile").read_text(encoding="utf-8")
 
+    assert re.search(r"http_port 8080\s+https_port 8443", caddyfile)
+    assert re.search(r"servers\s*\{\s*protocols h1 h2\s*\}", caddyfile)
+    assert "h3" not in caddyfile
     assert re.search(r"request_body\s*\{\s*max_size 128KiB\s*\}", caddyfile)
     assert "untrusted inbound X-Forwarded-*" in caddyfile
     assert "header_up" not in caddyfile

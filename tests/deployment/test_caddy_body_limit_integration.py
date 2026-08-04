@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import os
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -56,8 +57,13 @@ def _request(
     *,
     chunked: bool,
     forwarded_for: str | None = None,
-) -> int:
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+) -> tuple[int, list[tuple[str, str]]]:
+    connection = http.client.HTTPSConnection(
+        "localhost",
+        port,
+        timeout=5,
+        context=ssl._create_unverified_context(),
+    )
     try:
         headers = {"Content-Type": "application/octet-stream"}
         if forwarded_for is not None:
@@ -71,7 +77,7 @@ def _request(
         )
         response = connection.getresponse()
         response.read()
-        return response.status
+        return response.status, response.getheaders()
     finally:
         connection.close()
 
@@ -89,7 +95,7 @@ def test_caddy_rejects_content_length_and_chunked_bodies_over_128_kib(tmp_path: 
     environment = os.environ.copy()
     environment.update(
         {
-            "AEMEATH_DOMAIN": f"http://127.0.0.1:{proxy_port}",
+            "AEMEATH_DOMAIN": f"https://localhost:{proxy_port}",
             "AEMEATH_API_UPSTREAM": f"127.0.0.1:{backend_port}",
             "XDG_DATA_HOME": str(tmp_path / "caddy-data"),
             "XDG_CONFIG_HOME": str(tmp_path / "caddy-config"),
@@ -112,18 +118,21 @@ def test_caddy_rejects_content_length_and_chunked_bodies_over_128_kib(tmp_path: 
                     raise AssertionError("Caddy did not become ready")
                 time.sleep(0.05)
 
-        assert (
-            _request(
-                proxy_port,
-                b"x" * RAW_BODY_LIMIT,
-                chunked=False,
-                forwarded_for="198.51.100.5, 203.0.113.9",
-            )
-            == 204
+        status, response_headers = _request(
+            proxy_port,
+            b"x" * RAW_BODY_LIMIT,
+            chunked=False,
+            forwarded_for="198.51.100.5, 203.0.113.9",
         )
-        assert _request(proxy_port, b"x" * (RAW_BODY_LIMIT + 1), chunked=False) == 413
-        assert _request(proxy_port, [b"x" * RAW_BODY_LIMIT], chunked=True) == 204
-        assert _request(proxy_port, [b"x" * (RAW_BODY_LIMIT + 1)], chunked=True) == 413
+        assert status == 204
+        assert "alt-svc" not in {name.lower() for name, _value in response_headers}
+        assert _request(
+            proxy_port, b"x" * (RAW_BODY_LIMIT + 1), chunked=False
+        )[0] == 413
+        assert _request(proxy_port, [b"x" * RAW_BODY_LIMIT], chunked=True)[0] == 204
+        assert _request(
+            proxy_port, [b"x" * (RAW_BODY_LIMIT + 1)], chunked=True
+        )[0] == 413
         assert _BodySink.forwarded_for_values[0] == "127.0.0.1"
     finally:
         process.terminate()
