@@ -277,6 +277,79 @@ Permission v0.1 is owner-only. Session owner failures continue to use
 `SESSION_OWNERSHIP_DENIED`; generic non-session owner-only failures use `PERMISSION_DENIED`.
 Roles are carried in `UserContext` for future use but are not a full RBAC model in v0.1.
 
+## Invitation-only Web MVP Interfaces
+
+Status: **Browser Auth and invitations v0.1 implemented; streaming, Session API completion, and the
+production frontend remain planned.**
+
+Canonical contract: `docs/web_mvp_contract.md`.
+
+The Web adapter now provides browser-session authentication without changing `UserContext`
+or placing Cookie logic in `DialogueController`:
+
+```python
+class BrowserSessionAuthPort(Protocol):
+    def resolve_session_token(
+        self,
+        *,
+        token: str | None,
+        request_id: str,
+    ) -> UserContext: ...
+```
+
+The API adapter may read the raw Cookie value and pass it once to this Auth boundary. Downstream
+services receive only `UserContext`; they never receive a Cookie, invitation/reset token, password,
+or CSRF token. Production Web mode fails closed when browser and dev Bearer credentials are mixed.
+
+Web Auth Session identity is distinct from dialogue `session_id`. Implemented persistence includes
+credentials, invitation/reset digests, and browser-session digests/expiry/revocation. Raw tokens and
+passwords are never stored. Both raw SQLite and SQLAlchemy-on-SQLite satisfy the same contract tests.
+Chat-request idempotency remains part of the future streaming task.
+
+The streaming Service boundary is:
+
+```python
+class AgentStreamServicePort(Protocol):
+    def stream_chat(
+        self,
+        *,
+        user_context: UserContext,
+        request: StreamChatRequest,
+    ) -> Iterable[ChatStreamEvent]: ...
+```
+
+The stable public event sequence is `turn.started`, zero or more `response.delta`, and exactly one
+of `turn.completed` / `turn.failed`, plus content-free heartbeat comments. Provider reasoning,
+prompt/Memory/Evidence content, raw chunks, and vectors are not public event fields. HTTP/SSE types
+stay in `app/api`; the Streaming Worker must submit its internal Controller integration design before
+changing runtime code.
+
+Implemented Browser Auth API additions:
+
+```text
+POST  /v1/auth/invitations/accept
+POST  /v1/auth/login
+POST  /v1/auth/logout
+GET   /v1/auth/me
+GET   /v1/auth/csrf
+POST  /v1/auth/password/change
+POST  /v1/auth/password-reset/accept
+```
+
+Remaining planned Web API additions:
+
+```text
+PATCH /v1/sessions/{session_id}
+POST  /v1/sessions/{session_id}/end
+POST  /v1/sessions/{session_id}/resume
+POST  /v1/sessions/{session_id}/archive
+POST  /v1/chat/stream
+```
+
+The remaining paths and responsibilities are frozen; their DTO fields, new error codes, and store
+method signatures remain subject to each task's Manager-reviewed design. Browser Auth production
+activation remains gated by the later Web security and deployment acceptance tasks.
+
 ## Core Turn Contract
 
 位置：

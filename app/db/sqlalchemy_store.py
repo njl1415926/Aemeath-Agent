@@ -6,19 +6,29 @@ from typing import Any
 import numpy as np
 
 from app.accounts.schemas import AccountRecord, AccountStatus
+from app.auth.schemas import StoreSchemaInfo
 from app.db.repositories import (
     AccountRepository,
+    BrowserAuthRepository,
     MemoryEmbeddingRepository,
     MemoryJobRepository,
     MemoryRepository,
     MessageRepository,
     RelationshipRepository,
     SessionRepository,
+    StreamTurnRepository,
 )
 from app.db.session import (
     create_session_factory,
     create_sqlite_engine,
     initialize_database,
+)
+from app.db.stream_turns import (
+    StreamRequestRecord,
+    StreamTurnComplete,
+    StreamTurnFail,
+    StreamTurnResolveOrReserve,
+    StreamTurnResolveOutcome,
 )
 from app.embeddings.artifacts import EmbeddingArtifactUpsertOutcome, EmbeddingArtifactWrite
 from app.embeddings.schemas import EmbeddingModelSignature
@@ -40,13 +50,15 @@ class SqlAlchemyStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.engine = create_sqlite_engine(db_path)
-        initialize_database(self.engine)
+        initialize_database(self.engine, db_path=db_path)
         self.session_factory = create_session_factory(self.engine)
 
         self.accounts = AccountRepository(self.session_factory)
+        self.browser_auth = BrowserAuthRepository(db_path=db_path, backend="sqlalchemy")
         self.messages = MessageRepository(self.session_factory)
         self.sessions = SessionRepository(self.session_factory)
         self.relationships = RelationshipRepository(self.session_factory)
+        self.stream_turns = StreamTurnRepository(self.session_factory)
         self.memories = MemoryRepository(self.session_factory)
         self.memory_jobs = MemoryJobRepository(self.session_factory)
         self.memory_embeddings = MemoryEmbeddingRepository(self.session_factory)
@@ -104,6 +116,9 @@ class SqlAlchemyStore:
 
     def touch_account_login(self, *, account_id: str) -> AccountRecord:
         return self.accounts.touch_account_login(account_id=account_id)
+
+    def get_store_schema_info(self) -> StoreSchemaInfo:
+        return self.browser_auth.get_store_schema_info()
 
     def ensure_session(
         self,
@@ -209,6 +224,30 @@ class SqlAlchemyStore:
 
     def get_message(self, *, message_id: str) -> MessageRecord | None:
         return self.messages.get_message(message_id=message_id)
+
+    def resolve_or_reserve(
+        self,
+        *,
+        request: StreamTurnResolveOrReserve,
+    ) -> StreamTurnResolveOutcome:
+        return self.stream_turns.resolve_or_reserve(request=request)
+
+    def complete(self, *, request: StreamTurnComplete) -> StreamRequestRecord:
+        return self.stream_turns.complete(request=request)
+
+    def fail(self, *, request: StreamTurnFail) -> StreamRequestRecord:
+        return self.stream_turns.fail(request=request)
+
+    def fail_orphan_if_owned_by_other_runtime(
+        self,
+        *,
+        owner_runtime_id: str,
+        limit: int = 100,
+    ) -> int:
+        return self.stream_turns.fail_orphan_if_owned_by_other_runtime(
+            owner_runtime_id=owner_runtime_id,
+            limit=limit,
+        )
 
     def list_messages_by_session(self, *, session_id: str) -> list[MessageRecord]:
         return self.messages.list_messages_by_session(session_id=session_id)

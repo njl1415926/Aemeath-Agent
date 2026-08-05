@@ -1,6 +1,6 @@
 # Codex 跨 Session 调度 Runbook
 
-最后验证：2026-07-27
+最后验证：2026-08-04
 目标读者：负责调度其他 Codex session 的 agent
 
 ## 结论
@@ -56,7 +56,7 @@ Windows 默认位置：
 ## 当前 Worker / Review Session 注册表
 
 以下清单来自当前 `CODEX_HOME` 的 App Server 与 `session_index.jsonl`，包括当前用于
-跨 session 调度的 Worker 和 Review Session，核对日期为 2026-07-27。调度时优先使用
+跨 session 调度的 Worker 和 Review Session，核对日期为 2026-08-04。调度时优先使用
 thread id；名称用于人工识别，后续仍可能被重命名。
 
 | Session | Thread ID |
@@ -76,6 +76,10 @@ thread id；名称用于人工识别，后续仍可能被重命名。
 | Worker Session 13：Embedding Foundation v0.1 | `019f5fa0-6171-7a63-9bd8-5039efb4ec2d` |
 | Worker Session 14：Context Budget And Compression v0.1 | `019f4599-7d2f-7410-a84d-277f60a88a02` |
 | Worker Session 15：Semantic Query | `019fa168-dca7-7843-8209-1ff56e2db6db` |
+| Worker Session 16：Runtime Guardrails v0.1 | `019fa7fb-eed5-73b1-8065-f97f650f33a3` |
+| Worker Session 17：Deployment Readiness v0.1 | `019facb3-420a-7861-92b7-492ec1898724` |
+| Worker Session 18：Browser Auth And Invitations | `019fca7d-2e2a-7e31-8349-1b3d3a40c028` |
+| Worker Session 19：Streaming Chat Runtime And API v0.1 | `019fcb94-62db-7923-a074-7d1b0cce7e26` |
 
 编号 12 是 Review Session 而非 Worker Session，但属于当前跨 session 调度对象，因此
 一并登记。

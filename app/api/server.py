@@ -10,15 +10,17 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.dependencies import build_api_runtime
+from app.api.dependencies import ApiRuntime, build_api_runtime
 from app.api.errors import error_response, register_exception_handlers, validation_error_info
-from app.api.routes import chat, health, sessions
+from app.api.routes import auth, chat, health, sessions
+from app.api.web_security import enforce_web_request_provenance
 from app.config import Settings
 from app.db.readiness import build_database_readiness
 from app.deployment.preflight import run_startup_preflight
 from app.errors import map_exception, redact_sensitive
 from app.main import build_application_runtime
 from app.observability.schemas import AppLogRecord
+from app.runtime.guardrails.errors import ApiRateLimitedError
 from app.runtime.guardrails.rate_limit import InProcessApiRateLimiter
 from app.runtime.readiness import (
     ApplicationReadiness,
@@ -29,6 +31,11 @@ from app.runtime.resources import ApplicationRuntime
 from app.utils.ids import new_id
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_PRE_AUTH_ENDPOINTS = {
+    "/v1/auth/invitations/accept": "invitation_accept",
+    "/v1/auth/login": "login",
+    "/v1/auth/password-reset/accept": "password_reset_accept",
+}
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -112,6 +119,11 @@ def _create_app_with_runtime(application_runtime: ApplicationRuntime) -> FastAPI
         started_at = perf_counter()
         response = None
         try:
+            enforce_web_request_provenance(
+                request=request,
+                settings=resolved_settings,
+            )
+            _enforce_early_pre_auth(request=request, runtime=runtime)
             response = await call_next(request)
         except Exception as exc:
             if isinstance(exc, RequestValidationError):
@@ -138,9 +150,31 @@ def _create_app_with_runtime(application_runtime: ApplicationRuntime) -> FastAPI
 
     register_exception_handlers(app)
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(chat.router)
     app.include_router(sessions.router)
     return app
+
+
+def _enforce_early_pre_auth(*, request: Request, runtime: ApiRuntime) -> None:
+    if runtime.settings.api_auth_mode != "web_session" or request.method != "POST":
+        return
+    endpoint = _PRE_AUTH_ENDPOINTS.get(request.url.path)
+    if endpoint is None:
+        return
+    browser = runtime.browser_auth
+    if browser is None:
+        raise RuntimeError("browser_auth_runtime_missing")
+    decision = browser.pre_auth_limiter.check_request(
+        endpoint=endpoint,
+        ip_value=request.client.host if request.client is not None else None,
+    )
+    if not decision.allowed:
+        raise ApiRateLimitedError(
+            f"auth_pre_{decision.reason}",
+            retry_after_seconds=decision.retry_after_seconds,
+        )
+    request.state.pre_auth_endpoint = endpoint
 
 
 def _readiness_filesystem_paths(settings: Settings) -> tuple[Path, ...]:
@@ -173,23 +207,29 @@ def _record_api_request_log(
 ) -> None:
     runtime = request.app.state.runtime
     is_error = status_code >= 400
-    runtime.app_logger.record(
-        AppLogRecord(
-            event_name="api.request_failed" if is_error else "api.request_completed",
-            level="error" if is_error else "info",
-            request_id=getattr(request.state, "request_id", None),
-            user_id=getattr(request.state, "user_id", None),
-            error_code=error_code,
-            payload=redact_sensitive(
-                {
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status_code": status_code,
-                    "duration_ms": duration_ms,
-                    "external_request_id_accepted": bool(
-                        getattr(request.state, "external_request_id_accepted", False)
-                    ),
-                }
-            ),
+    try:
+        runtime.app_logger.record(
+            AppLogRecord(
+                event_name="api.request_failed" if is_error else "api.request_completed",
+                level="error" if is_error else "info",
+                request_id=getattr(request.state, "request_id", None),
+                user_id=getattr(request.state, "user_id", None),
+                error_code=error_code,
+                payload=redact_sensitive(
+                    {
+                        "method": request.method,
+                        "path": request.url.path,
+                        "status_code": status_code,
+                        "duration_ms": duration_ms,
+                        "external_request_id_accepted": bool(
+                            getattr(request.state, "external_request_id_accepted", False)
+                        ),
+                        "web_session_correlation": getattr(
+                            request.state, "web_session_correlation", None
+                        ),
+                    }
+                ),
+            )
         )
-    )
+    except Exception:
+        return None

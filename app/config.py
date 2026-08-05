@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from app.deployment.secrets import (
     API_BEARER_SECRET_PATH,
     DEEPSEEK_SECRET_PATH,
+    WEB_AUTH_CSRF_SECRET_PATH,
     resolve_secret,
 )
 
@@ -141,6 +142,25 @@ class Settings:
     deployment_app_root: Path = Path("/opt/aemeath")
     deepseek_api_key_from_file: bool = False
     dev_auth_token_from_file: bool = False
+    api_auth_mode: str = "dev_bearer"
+    web_public_origin: str = ""
+    web_auth_csrf_key: bytes | None = field(default=None, repr=False)
+    web_auth_csrf_key_from_file: bool = False
+    invitation_ttl_seconds: int = 86_400
+    password_reset_ttl_seconds: int = 3_600
+    web_session_idle_seconds: int = 604_800
+    web_session_absolute_seconds: int = 2_592_000
+    web_session_touch_seconds: int = 300
+    web_auth_cleanup_batch_size: int = 100
+    password_profile: str = "argon2id_owasp_2026_v1"
+    password_work_concurrency: int = 1
+    password_work_wait_timeout_seconds: float = 1.0
+    auth_pre_rate_per_minute: int = 20
+    auth_pre_burst: int = 5
+    auth_pre_global_rate_per_minute: int = 300
+    auth_pre_global_burst: int = 50
+    auth_pre_rate_idle_ttl_seconds: float = 600.0
+    auth_pre_rate_max_buckets: int = 4096
 
     @staticmethod
     def from_env() -> "Settings":
@@ -166,6 +186,17 @@ class Settings:
             "AEMEATH_DEV_AUTH_TOKEN_FILE",
             environment=environment,
             approved_file_path=API_BEARER_SECRET_PATH,
+        )
+        web_auth_csrf_key_text = resolve_secret(
+            "AEMEATH_WEB_AUTH_CSRF_KEY",
+            "AEMEATH_WEB_AUTH_CSRF_KEY_FILE",
+            environment=environment,
+            approved_file_path=WEB_AUTH_CSRF_SECRET_PATH,
+        )
+        web_auth_csrf_key = (
+            web_auth_csrf_key_text.encode("utf-8")
+            if web_auth_csrf_key_text is not None
+            else None
         )
 
         db_path = Path(os.getenv("AEMEATH_DB_PATH", "data/aemeath.db"))
@@ -394,6 +425,53 @@ class Settings:
             ),
             deepseek_api_key_from_file="DEEPSEEK_API_KEY_FILE" in os.environ,
             dev_auth_token_from_file="AEMEATH_DEV_AUTH_TOKEN_FILE" in os.environ,
+            api_auth_mode=os.getenv("AEMEATH_API_AUTH_MODE", "dev_bearer").strip(),
+            web_public_origin=os.getenv("AEMEATH_WEB_PUBLIC_ORIGIN", "").strip(),
+            web_auth_csrf_key=web_auth_csrf_key,
+            web_auth_csrf_key_from_file="AEMEATH_WEB_AUTH_CSRF_KEY_FILE" in os.environ,
+            invitation_ttl_seconds=int(
+                os.getenv("AEMEATH_INVITATION_TTL_SECONDS", "86400")
+            ),
+            password_reset_ttl_seconds=int(
+                os.getenv("AEMEATH_PASSWORD_RESET_TTL_SECONDS", "3600")
+            ),
+            web_session_idle_seconds=int(
+                os.getenv("AEMEATH_WEB_SESSION_IDLE_SECONDS", "604800")
+            ),
+            web_session_absolute_seconds=int(
+                os.getenv("AEMEATH_WEB_SESSION_ABSOLUTE_SECONDS", "2592000")
+            ),
+            web_session_touch_seconds=int(
+                os.getenv("AEMEATH_WEB_SESSION_TOUCH_SECONDS", "300")
+            ),
+            web_auth_cleanup_batch_size=int(
+                os.getenv("AEMEATH_WEB_AUTH_CLEANUP_BATCH_SIZE", "100")
+            ),
+            password_profile=os.getenv(
+                "AEMEATH_PASSWORD_PROFILE", "argon2id_owasp_2026_v1"
+            ),
+            password_work_concurrency=int(
+                os.getenv("AEMEATH_PASSWORD_WORK_CONCURRENCY", "1")
+            ),
+            password_work_wait_timeout_seconds=float(
+                os.getenv("AEMEATH_PASSWORD_WORK_WAIT_TIMEOUT_SECONDS", "1")
+            ),
+            auth_pre_rate_per_minute=int(
+                os.getenv("AEMEATH_AUTH_PRE_RATE_PER_MINUTE", "20")
+            ),
+            auth_pre_burst=int(os.getenv("AEMEATH_AUTH_PRE_BURST", "5")),
+            auth_pre_global_rate_per_minute=int(
+                os.getenv("AEMEATH_AUTH_PRE_GLOBAL_RATE_PER_MINUTE", "300")
+            ),
+            auth_pre_global_burst=int(
+                os.getenv("AEMEATH_AUTH_PRE_GLOBAL_BURST", "50")
+            ),
+            auth_pre_rate_idle_ttl_seconds=float(
+                os.getenv("AEMEATH_AUTH_PRE_RATE_IDLE_TTL_SECONDS", "600")
+            ),
+            auth_pre_rate_max_buckets=int(
+                os.getenv("AEMEATH_AUTH_PRE_RATE_MAX_BUCKETS", "4096")
+            ),
         )
 
     def validate(self) -> None:
@@ -403,6 +481,54 @@ class Settings:
             raise ValueError(
                 "AEMEATH_DB_BACKEND must be either 'sqlite_raw' or 'sqlalchemy'."
             )
+        if self.api_auth_mode not in {"dev_bearer", "web_session"}:
+            raise ValueError(
+                "AEMEATH_API_AUTH_MODE must be either dev_bearer or web_session."
+            )
+        if not 3_600 <= self.invitation_ttl_seconds <= 604_800:
+            raise ValueError("AEMEATH_INVITATION_TTL_SECONDS is outside reviewed bounds.")
+        if not 300 <= self.password_reset_ttl_seconds <= 86_400:
+            raise ValueError(
+                "AEMEATH_PASSWORD_RESET_TTL_SECONDS is outside reviewed bounds."
+            )
+        if not 300 <= self.web_session_idle_seconds <= 604_800:
+            raise ValueError("AEMEATH_WEB_SESSION_IDLE_SECONDS is outside reviewed bounds.")
+        if not (
+            self.web_session_idle_seconds
+            <= self.web_session_absolute_seconds
+            <= 2_592_000
+        ):
+            raise ValueError(
+                "AEMEATH_WEB_SESSION_ABSOLUTE_SECONDS is outside reviewed bounds."
+            )
+        if not 60 <= self.web_session_touch_seconds <= 900:
+            raise ValueError("AEMEATH_WEB_SESSION_TOUCH_SECONDS is outside reviewed bounds.")
+        if self.web_session_touch_seconds >= self.web_session_idle_seconds:
+            raise ValueError("AEMEATH_WEB_SESSION_TOUCH_SECONDS must be below idle timeout.")
+        if not 1 <= self.web_auth_cleanup_batch_size <= 1000:
+            raise ValueError("AEMEATH_WEB_AUTH_CLEANUP_BATCH_SIZE is outside reviewed bounds.")
+        if self.password_profile != "argon2id_owasp_2026_v1":
+            raise ValueError("AEMEATH_PASSWORD_PROFILE is not approved.")
+        if self.password_work_concurrency != 1:
+            raise ValueError("AEMEATH_PASSWORD_WORK_CONCURRENCY must be exactly 1 in v0.1.")
+        if self.password_work_wait_timeout_seconds < 0:
+            raise ValueError("AEMEATH_PASSWORD_WORK_WAIT_TIMEOUT_SECONDS must be non-negative.")
+        for name, value in (
+            ("AEMEATH_AUTH_PRE_RATE_PER_MINUTE", self.auth_pre_rate_per_minute),
+            ("AEMEATH_AUTH_PRE_BURST", self.auth_pre_burst),
+            (
+                "AEMEATH_AUTH_PRE_GLOBAL_RATE_PER_MINUTE",
+                self.auth_pre_global_rate_per_minute,
+            ),
+            ("AEMEATH_AUTH_PRE_GLOBAL_BURST", self.auth_pre_global_burst),
+            ("AEMEATH_AUTH_PRE_RATE_MAX_BUCKETS", self.auth_pre_rate_max_buckets),
+        ):
+            if isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer.")
+        if self.auth_pre_rate_idle_ttl_seconds <= 0:
+            raise ValueError("AEMEATH_AUTH_PRE_RATE_IDLE_TTL_SECONDS must be positive.")
+        if self.api_auth_mode == "web_session":
+            self._validate_web_auth()
         from app.embeddings.factory import validate_runtime_options
         from app.embeddings.schemas import EmbeddingRuntimeOptions
 
@@ -535,6 +661,28 @@ class Settings:
             if self.environment == "prod" and parsed.scheme != "https":
                 raise ValueError("Production CORS origins must use HTTPS.")
 
+    def _validate_web_auth(self) -> None:
+        parsed = urlsplit(self.web_public_origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or self.web_public_origin.endswith("/")
+        ):
+            raise ValueError("AEMEATH_WEB_PUBLIC_ORIGIN must be an exact origin.")
+        if self.environment == "prod" and parsed.scheme != "https":
+            raise ValueError("AEMEATH_WEB_PUBLIC_ORIGIN must use HTTPS in prod.")
+        if self.api_cors_allowed_origins:
+            raise ValueError("Web Session mode requires an empty CORS allowlist.")
+        if self.api_allow_local_default_user:
+            raise ValueError("Web Session mode rejects the local default account adapter.")
+        if self.web_auth_csrf_key is None or len(self.web_auth_csrf_key) < 32:
+            raise ValueError("AEMEATH_WEB_AUTH_CSRF_KEY_FILE must provide at least 32 bytes.")
+
     def _validate_production(self) -> None:
         fixed_paths = {
             "AEMEATH_DB_PATH": (self.db_path, "/var/lib/aemeath/data/aemeath.db"),
@@ -555,6 +703,8 @@ class Settings:
                 raise ValueError(f"{name} must use the approved production path.")
         if self.db_backend != "sqlite_raw":
             raise ValueError("AEMEATH_DB_BACKEND must be sqlite_raw in prod.")
+        if self.api_auth_mode != "dev_bearer":
+            raise ValueError("The accepted D4 production baseline requires dev_bearer mode.")
         if self.use_mock_llm:
             raise ValueError("AEMEATH_USE_MOCK_LLM must be false in prod.")
         if self.enable_model_fallback or self.api_enable_model_fallback:

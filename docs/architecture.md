@@ -32,6 +32,39 @@ business-policy owners.
 before reaching `DialogueController`. FastAPI also adds auth, request-id, API error mapping, and
 app-log behavior at the HTTP adapter boundary.
 
+## 2026-08-04 Invitation-only Web MVP Target
+
+The Manager-frozen Web target is documented in `docs/web_mvp_contract.md`. Browser Auth and
+invitation runtime support is implemented under T-0142; streaming, Session API completion, the
+frontend, and production Web-profile activation remain gated work:
+
+```text
+Browser
+  -> same-origin Caddy
+       -> React/TypeScript/Vite static assets
+       -> /v1/*, /health, /ready reverse proxy
+  -> FastAPI
+       -> Browser Session Auth -> UserContext
+       -> AgentStreamService / AgentService
+       -> SessionService
+  -> existing Controller and domain ports
+```
+
+The first Web release is invitation-only, single-character, text-only, single-node, and CPU-only.
+Production browser authentication uses an opaque server-side Cookie Session with CSRF protection;
+the existing dev Bearer token is not exposed to frontend JavaScript. Web Auth Sessions are separate
+from dialogue Sessions and do not own conversation lifecycle or history.
+
+Streaming is a Service/API capability with domain events. HTTP, SSE, Cookie, and CSRF types remain
+outside `DialogueController`, Character, Memory, RAG, Prompt, State, and model provider ports. The
+synchronous `AgentService` path remains compatible while the Web frontend uses the future streaming
+path. Caddy serves static assets and API from one HTTPS origin, so production CORS remains empty and
+the final image does not run Node.js.
+
+Implementation is split into T-0142 through T-0146. T-0142 is accepted; D6 backup may now proceed
+against the frozen Auth schema. D7 must observe final Web events, and D8 remains the real-cloud
+acceptance gate.
+
 ## 2026-07-26 Embedding Foundation And Artifact Persistence
 
 Embedding is now a shared infrastructure capability rather than a Retrieval-owned implementation:

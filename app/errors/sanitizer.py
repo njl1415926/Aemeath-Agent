@@ -11,14 +11,17 @@ SENSITIVE_KEY_PARTS = (
     "x_api_key",
     "authorization",
     "cookie",
+    "csrf",
+    "digest",
     "password",
     "secret",
     "token",
+    "verifier",
 )
 
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", flags=re.I)
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(x[_-]?api[_-]?key|api[_-]?key|authorization|cookie|password|secret|token)\b"
+    r"(?i)\b(x[_-]?api[_-]?key|api[_-]?key|authorization|cookie|csrf|digest|password|secret|token|verifier)\b"
     r"\s*[:=]\s*[^,\s;]+"
 )
 

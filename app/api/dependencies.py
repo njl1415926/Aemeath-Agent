@@ -6,7 +6,17 @@ from typing import Any
 from fastapi import Depends, Header, Request
 
 from app.accounts.service import AccountService
-from app.auth.errors import AuthRequiredError
+from app.auth.browser_sessions import BrowserSessionAuthService
+from app.auth.csrf import csrf_token_matches, derive_csrf_token
+from app.auth.errors import (
+    AuthCredentialConflictError,
+    AuthRequiredError,
+    CsrfInvalidError,
+)
+from app.auth.invitations import InvitationService, PasswordResetService
+from app.auth.passwords import PasswordEngine
+from app.auth.rate_limit import InProcessPreAuthRateLimiter
+from app.auth.schemas import AuthenticatedBrowserSession
 from app.auth.service import AuthService, LocalDefaultAccountResolver
 from app.config import Settings
 from app.db.store_factory import StoreFacade
@@ -32,6 +42,16 @@ class ApiRuntime:
     store: StoreFacade
     app_logger: AppLoggerPort
     rate_limiter: ApiRateLimiterPort
+    browser_auth: "BrowserAuthRuntime | None" = None
+
+
+@dataclass(frozen=True)
+class BrowserAuthRuntime:
+    sessions: BrowserSessionAuthService
+    invitations: InvitationService
+    password_resets: PasswordResetService
+    pre_auth_limiter: InProcessPreAuthRateLimiter
+    csrf_key: bytes
 
 
 def build_api_runtime(
@@ -42,6 +62,51 @@ def build_api_runtime(
     rate_limiter: ApiRateLimiterPort,
 ) -> ApiRuntime:
     account_service = AccountService(store)
+    browser_auth = None
+    if settings.api_auth_mode == "web_session":
+        password_engine = PasswordEngine(
+            concurrency=settings.password_work_concurrency,
+            wait_timeout_seconds=settings.password_work_wait_timeout_seconds,
+        )
+        browser_sessions = BrowserSessionAuthService(
+            store=store.browser_auth,
+            passwords=password_engine,
+            app_logger=agent_service.app_logger,
+            idle_seconds=settings.web_session_idle_seconds,
+            absolute_seconds=settings.web_session_absolute_seconds,
+            touch_seconds=settings.web_session_touch_seconds,
+        )
+        csrf_key = settings.web_auth_csrf_key
+        if csrf_key is None:
+            raise ValueError("web_auth_csrf_key_missing")
+        browser_auth = BrowserAuthRuntime(
+            sessions=browser_sessions,
+            invitations=InvitationService(
+                store=store.browser_auth,
+                passwords=password_engine,
+                sessions=browser_sessions,
+                app_logger=agent_service.app_logger,
+                public_origin=settings.web_public_origin,
+                lifetime_seconds=settings.invitation_ttl_seconds,
+            ),
+            password_resets=PasswordResetService(
+                store=store.browser_auth,
+                passwords=password_engine,
+                sessions=browser_sessions,
+                app_logger=agent_service.app_logger,
+                public_origin=settings.web_public_origin,
+                lifetime_seconds=settings.password_reset_ttl_seconds,
+            ),
+            pre_auth_limiter=InProcessPreAuthRateLimiter(
+                rate_per_minute=settings.auth_pre_rate_per_minute,
+                burst=settings.auth_pre_burst,
+                global_rate_per_minute=settings.auth_pre_global_rate_per_minute,
+                global_burst=settings.auth_pre_global_burst,
+                idle_ttl_seconds=settings.auth_pre_rate_idle_ttl_seconds,
+                max_buckets=settings.auth_pre_rate_max_buckets,
+            ),
+            csrf_key=csrf_key,
+        )
     return ApiRuntime(
         agent_service=agent_service,
         session_service=SessionService(session_store=store, message_store=store),
@@ -54,6 +119,7 @@ def build_api_runtime(
         store=store,
         app_logger=agent_service.app_logger,
         rate_limiter=rate_limiter,
+        browser_auth=browser_auth,
     )
 
 
@@ -80,7 +146,30 @@ def get_user_context(
         "method": request.method,
         "path": request.url.path,
     }
-    if authorization:
+    cookie_token = extract_web_session_cookie(request)
+    if authorization and cookie_token is not None:
+        raise AuthCredentialConflictError()
+    if runtime.settings.api_auth_mode == "web_session":
+        if authorization:
+            raise AuthCredentialConflictError()
+        if cookie_token is None:
+            raise AuthRequiredError()
+        browser = require_browser_auth_runtime(runtime)
+        try:
+            authenticated = browser.sessions.resolve_session_token(
+                token=cookie_token,
+                request_id=request_id,
+            )
+        except Exception:
+            request.state.clear_web_session_cookie = True
+            raise
+        request.state.web_auth_session = authenticated
+        request.state.web_session_id = authenticated.web_session_id
+        request.state.web_session_correlation = authenticated.correlation_digest
+        user_context = authenticated.user_context
+    elif cookie_token is not None:
+        raise AuthCredentialConflictError()
+    elif authorization:
         user_context = runtime.auth_service.resolve_bearer_token(
             authorization,
             request_id=request_id,
@@ -94,6 +183,12 @@ def get_user_context(
     else:
         raise AuthRequiredError()
     request.state.user_id = user_context.user_id
+    if runtime.settings.api_auth_mode == "web_session" and request.method not in {
+        "GET",
+        "HEAD",
+        "OPTIONS",
+    }:
+        require_valid_csrf(request=request, runtime=runtime)
     return user_context
 
 
@@ -138,3 +233,64 @@ def get_rate_limited_user_context(
         )
     )
     return user_context
+
+
+def get_authenticated_browser_session(
+    request: Request,
+    user_context: UserContext = Depends(get_user_context),
+) -> AuthenticatedBrowserSession:
+    del user_context
+    authenticated = getattr(request.state, "web_auth_session", None)
+    if not isinstance(authenticated, AuthenticatedBrowserSession):
+        raise AuthRequiredError()
+    return authenticated
+
+
+def get_csrf_authenticated_browser_session(
+    request: Request,
+    authenticated: AuthenticatedBrowserSession = Depends(get_authenticated_browser_session),
+    runtime: ApiRuntime = Depends(get_runtime),
+) -> AuthenticatedBrowserSession:
+    require_valid_csrf(request=request, runtime=runtime)
+    return authenticated
+
+
+def require_valid_csrf(*, request: Request, runtime: ApiRuntime) -> None:
+    browser = require_browser_auth_runtime(runtime)
+    authenticated = getattr(request.state, "web_auth_session", None)
+    if not isinstance(authenticated, AuthenticatedBrowserSession):
+        raise AuthRequiredError()
+    expected = derive_csrf_token(
+        key=browser.csrf_key,
+        web_session_id=authenticated.web_session_id,
+        verifier=authenticated.csrf_verifier,
+    )
+    if not csrf_token_matches(
+        expected=expected,
+        provided=request.headers.get("X-CSRF-Token"),
+    ):
+        raise CsrfInvalidError()
+
+
+def require_browser_auth_runtime(runtime: ApiRuntime) -> BrowserAuthRuntime:
+    if runtime.browser_auth is None:
+        raise AuthRequiredError()
+    return runtime.browser_auth
+
+
+def extract_web_session_cookie(request: Request) -> str | None:
+    values: list[str] = []
+    for raw_header in request.headers.getlist("cookie"):
+        for component in raw_header.split(";"):
+            name, separator, value = component.strip().partition("=")
+            if separator and name == "__Host-aemeath_session":
+                values.append(value)
+    if len(values) > 1:
+        request.state.clear_web_session_cookie = True
+        raise AuthCredentialConflictError()
+    if not values or not values[0]:
+        return None
+    if len(values[0]) > 64:
+        request.state.clear_web_session_cookie = True
+        raise AuthCredentialConflictError()
+    return values[0]

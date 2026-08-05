@@ -9,14 +9,34 @@ from typing import Any
 import numpy as np
 
 from app.accounts.schemas import AccountRecord, AccountStatus
+from app.auth.schemas import StoreSchemaInfo
+from app.db.browser_auth_migrations import ensure_browser_auth_schema
 from app.db.errors import StorageMigrationRequiredError
 from app.db.memory_artifact_contract import (
     StoredMemoryEmbeddingArtifact,
     classify_memory_embedding_artifact_gap,
 )
+from app.db.repositories.browser_auth import BrowserAuthRepository
 from app.db.sqlite_index_contract import (
     ACTIVE_MEMORY_IDENTITY_INDEX,
     has_valid_active_memory_identity_index,
+)
+from app.db.stream_turns import (
+    StreamRequestRecord,
+    StreamTurnComplete,
+    StreamTurnFail,
+    StreamTurnResolveOrReserve,
+    StreamTurnResolveOutcome,
+    apply_stream_turn_state_update,
+    parse_stream_turn_state_delta,
+    parse_stream_turn_warnings,
+    stream_turn_state_delta_json,
+    stream_turn_warnings_json,
+)
+from app.db.streaming_chat_migrations import (
+    STREAMING_CHAT_IDEMPOTENCY_MIGRATION_IDS,
+    STREAMING_CHAT_IDEMPOTENCY_TABLE,
+    ensure_streaming_chat_schema,
 )
 from app.embeddings.artifacts import (
     EmbeddingArtifactDiagnostics,
@@ -78,13 +98,19 @@ class SQLiteStore:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self.browser_auth = BrowserAuthRepository(db_path=db_path, backend="sqlite_raw")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            connection.close()
+            raise StorageMigrationRequiredError(reason="foreign_keys_not_enabled")
         return connection
 
     def _init_db(self) -> None:
+        self._preflight_streaming_chat_schema()
         schema_path = Path(__file__).with_name("schema.sql")
         schema_sql = schema_path.read_text(encoding="utf-8")
         with self._connect() as conn:
@@ -97,6 +123,36 @@ class SQLiteStore:
             self._migrate_memory_scope_provenance(conn)
             self._migrate_memory_exact_active_identity(conn)
             self._migrate_memory_embedding_artifacts(conn)
+        ensure_browser_auth_schema(self.db_path)
+        ensure_streaming_chat_schema(self.db_path)
+
+    def _preflight_streaming_chat_schema(self) -> None:
+        """Reject marked drift before schema.sql can create a missing object."""
+
+        with self._connect() as conn:
+            migration_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            ).fetchone()
+            placeholders = ", ".join(
+                "?" for _ in STREAMING_CHAT_IDEMPOTENCY_MIGRATION_IDS
+            )
+            marker = (
+                conn.execute(
+                    "SELECT 1 FROM schema_migrations "
+                    f"WHERE version IN ({placeholders})",
+                    STREAMING_CHAT_IDEMPOTENCY_MIGRATION_IDS,
+                ).fetchone()
+                if migration_table is not None
+                else None
+            )
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (STREAMING_CHAT_IDEMPOTENCY_TABLE,),
+            ).fetchone()
+        if table is not None:
+            ensure_streaming_chat_schema(self.db_path)
+        elif marker is not None:
+            raise StorageMigrationRequiredError(reason="streaming_chat_table_missing")
 
     def _has_valid_active_memory_identity_index(self, conn: sqlite3.Connection) -> bool:
         index_list_rows = conn.execute(
@@ -634,30 +690,54 @@ class SQLiteStore:
             )
 
         now = utc_now()
+        has_normalized = self._table_has_column(
+            conn, table_name="accounts", column_name="username_normalized"
+        )
         for user_id in sorted(user_ids):
             display_name = "Default User" if user_id == DEFAULT_ACCOUNT_ID else user_id
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO accounts (
-                    id, username, display_name, status, roles_json,
-                    dev_token_hash, created_at, updated_at, last_login_at
+            if has_normalized:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO accounts (
+                        id, username, username_normalized, display_name, status, roles_json,
+                        dev_token_hash, created_at, updated_at, last_login_at
+                    )
+                    VALUES (?, ?, ?, ?, 'active', ?, NULL, ?, ?, NULL)
+                    """,
+                    (
+                        user_id,
+                        user_id,
+                        user_id.lower(),
+                        display_name,
+                        DEFAULT_ACCOUNT_ROLES_JSON,
+                        now,
+                        now,
+                    ),
                 )
-                VALUES (?, ?, ?, 'active', ?, NULL, ?, ?, NULL)
-                """,
-                (
-                    user_id,
-                    user_id,
-                    display_name,
-                    DEFAULT_ACCOUNT_ROLES_JSON,
-                    now,
-                    now,
-                ),
-            )
+            else:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO accounts (
+                        id, username, display_name, status, roles_json,
+                        dev_token_hash, created_at, updated_at, last_login_at
+                    )
+                    VALUES (?, ?, ?, 'active', ?, NULL, ?, ?, NULL)
+                    """,
+                    (
+                        user_id,
+                        user_id,
+                        display_name,
+                        DEFAULT_ACCOUNT_ROLES_JSON,
+                        now,
+                        now,
+                    ),
+                )
 
     def _account_from_row(self, row: sqlite3.Row) -> AccountRecord:
         return AccountRecord(
             id=row["id"],
             username=row["username"],
+            username_normalized=row["username_normalized"],
             display_name=row["display_name"],
             status=row["status"],
             roles=json.loads(row["roles_json"]),
@@ -713,12 +793,11 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO accounts (
-                    id, username, display_name, status, roles_json,
+                    id, username, username_normalized, display_name, status, roles_json,
                     dev_token_hash, created_at, updated_at, last_login_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 ON CONFLICT(id) DO UPDATE SET
-                    username = excluded.username,
                     display_name = excluded.display_name,
                     status = excluded.status,
                     roles_json = excluded.roles_json,
@@ -728,6 +807,7 @@ class SQLiteStore:
                 (
                     account_id,
                     username,
+                    username.lower(),
                     display_name,
                     status,
                     roles_json,
@@ -748,6 +828,9 @@ class SQLiteStore:
         if row is None:
             raise sqlite3.IntegrityError(f"account {account_id!r} was not persisted")
         return self._account_from_row(row)
+
+    def get_store_schema_info(self) -> StoreSchemaInfo:
+        return self.browser_auth.get_store_schema_info()
 
     def set_account_dev_token_hash(
         self,
@@ -2433,3 +2516,580 @@ class SQLiteStore:
                 ),
             )
         return updated
+
+    def resolve_or_reserve(
+        self,
+        *,
+        request: StreamTurnResolveOrReserve,
+    ) -> StreamTurnResolveOutcome:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            session_row = self._stream_require_owned_session(
+                conn,
+                session_id=request.session_id,
+                user_id=request.user_id,
+                active_character_id=request.active_character_id,
+            )
+            if session_row["status"] == "archived":
+                raise SessionArchivedError("stream_turn_session_archived")
+            record_row = self._stream_find_by_scope(
+                conn,
+                user_id=request.user_id,
+                session_id=request.session_id,
+                client_message_id=request.client_message_id,
+            )
+            if session_row["status"] == "ended":
+                if (
+                    record_row is not None
+                    and self._stream_matches_fingerprint(record_row, request)
+                    and record_row["status"] in {"completed", "failed"}
+                ):
+                    outcome = self._stream_replay_outcome(
+                        conn,
+                        self._stream_record_from_row(record_row),
+                    )
+                else:
+                    raise SessionEndedError("stream_turn_session_ended")
+            elif record_row is None:
+                outcome = self._stream_reserve(conn, request=request)
+            elif not self._stream_matches_fingerprint(record_row, request):
+                outcome = StreamTurnResolveOutcome(
+                    kind="conflict",
+                    record=self._stream_record_from_row(record_row),
+                )
+            elif record_row["status"] == "in_progress":
+                if record_row["owner_runtime_id"] != request.owner_runtime_id:
+                    self._stream_mark_failed(
+                        conn,
+                        record_id=record_row["id"],
+                        error_code="CHAT_STREAM_INTERRUPTED",
+                        retryable=False,
+                        reason="runtime_orphaned",
+                    )
+                    record_row = self._stream_require_record(
+                        conn,
+                        record_id=record_row["id"],
+                        turn_id=record_row["turn_id"],
+                        user_id=record_row["user_id"],
+                        session_id=record_row["session_id"],
+                    )
+                    outcome = StreamTurnResolveOutcome(
+                        kind="replay_failed",
+                        record=self._stream_record_from_row(record_row),
+                    )
+                else:
+                    outcome = StreamTurnResolveOutcome(
+                        kind="in_progress",
+                        record=self._stream_record_from_row(record_row),
+                    )
+            else:
+                outcome = self._stream_replay_outcome(
+                    conn,
+                    self._stream_record_from_row(record_row),
+                )
+            conn.commit()
+            return outcome
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def complete(self, *, request: StreamTurnComplete) -> StreamRequestRecord:
+        if not request.assistant_response.strip():
+            raise ValueError("stream_turn_assistant_response_blank")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            record_row = self._stream_require_record(
+                conn,
+                record_id=request.record_id,
+                turn_id=request.turn_id,
+                user_id=request.user_id,
+                session_id=request.session_id,
+            )
+            if (
+                record_row["status"] != "in_progress"
+                or record_row["owner_runtime_id"] != request.owner_runtime_id
+            ):
+                result = self._stream_record_from_row(record_row)
+            else:
+                session_row = self._stream_require_owned_session(
+                    conn,
+                    session_id=request.session_id,
+                    user_id=request.user_id,
+                    active_character_id=record_row["active_character_id"],
+                )
+                if session_row["status"] != "active":
+                    self._stream_mark_failed(
+                        conn,
+                        record_id=record_row["id"],
+                        error_code=(
+                            "SESSION_ARCHIVED"
+                            if session_row["status"] == "archived"
+                            else "SESSION_ENDED"
+                        ),
+                        retryable=False,
+                        reason=(
+                            "session_archived"
+                            if session_row["status"] == "archived"
+                            else "session_ended"
+                        ),
+                    )
+                else:
+                    self._stream_complete_active_record(
+                        conn,
+                        record_row=record_row,
+                        request=request,
+                    )
+                result = self._stream_record_from_row(
+                    self._stream_require_record(
+                        conn,
+                        record_id=record_row["id"],
+                        turn_id=record_row["turn_id"],
+                        user_id=record_row["user_id"],
+                        session_id=record_row["session_id"],
+                    )
+                )
+            conn.commit()
+            return result
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def fail(self, *, request: StreamTurnFail) -> StreamRequestRecord:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            record_row = self._stream_require_record(
+                conn,
+                record_id=request.record_id,
+                turn_id=request.turn_id,
+                user_id=request.user_id,
+                session_id=request.session_id,
+            )
+            if (
+                record_row["status"] == "in_progress"
+                and record_row["owner_runtime_id"] == request.owner_runtime_id
+            ):
+                self._stream_mark_failed(
+                    conn,
+                    record_id=record_row["id"],
+                    error_code=request.terminal_error_code,
+                    retryable=request.terminal_retryable,
+                    reason=request.terminal_reason,
+                )
+                record_row = self._stream_require_record(
+                    conn,
+                    record_id=record_row["id"],
+                    turn_id=record_row["turn_id"],
+                    user_id=record_row["user_id"],
+                    session_id=record_row["session_id"],
+                )
+            result = self._stream_record_from_row(record_row)
+            conn.commit()
+            return result
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def fail_orphan_if_owned_by_other_runtime(
+        self,
+        *,
+        owner_runtime_id: str,
+        limit: int = 100,
+    ) -> int:
+        if not isinstance(owner_runtime_id, str) or not owner_runtime_id:
+            raise ValueError("stream_turn_owner_runtime_id_invalid")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise ValueError("stream_turn_orphan_limit_invalid")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM chat_request_idempotency
+                WHERE status = 'in_progress' AND owner_runtime_id != ?
+                ORDER BY updated_at, id
+                LIMIT ?
+                """,
+                (owner_runtime_id, limit),
+            ).fetchall()
+            for row in rows:
+                self._stream_mark_failed(
+                    conn,
+                    record_id=row["id"],
+                    error_code="CHAT_STREAM_INTERRUPTED",
+                    retryable=False,
+                    reason="runtime_orphaned",
+                )
+            conn.commit()
+            return len(rows)
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _stream_reserve(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        request: StreamTurnResolveOrReserve,
+    ) -> StreamTurnResolveOutcome:
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO messages (
+                id, session_id, user_id, role, content, created_at, emotion_label, importance_score
+            ) VALUES (?, ?, ?, 'user', ?, ?, NULL, NULL)
+            """,
+            (
+                request.user_message_id,
+                request.session_id,
+                request.user_id,
+                request.user_message_content,
+                now,
+            ),
+        )
+        record_id = new_id("stream_request")
+        conn.execute(
+            """
+            INSERT INTO chat_request_idempotency (
+                id, user_id, session_id, client_message_id, active_character_id,
+                request_fingerprint_version, request_fingerprint, turn_id, user_message_id,
+                assistant_message_id, status, owner_runtime_id, warnings_json, state_delta_json,
+                terminal_error_code, terminal_retryable, terminal_reason, created_at, updated_at,
+                completed_at, failed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'in_progress', ?, '[]', '{}',
+                      NULL, NULL, NULL, ?, ?, NULL, NULL)
+            """,
+            (
+                record_id,
+                request.user_id,
+                request.session_id,
+                request.client_message_id,
+                request.active_character_id,
+                request.request_fingerprint_version,
+                request.request_fingerprint,
+                request.turn_id,
+                request.user_message_id,
+                request.owner_runtime_id,
+                now,
+                now,
+            ),
+        )
+        return StreamTurnResolveOutcome(
+            kind="reserved",
+            record=self._stream_record_from_row(
+                self._stream_require_record(
+                    conn,
+                    record_id=record_id,
+                    turn_id=request.turn_id,
+                    user_id=request.user_id,
+                    session_id=request.session_id,
+                )
+            ),
+        )
+
+    def _stream_complete_active_record(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        record_row: sqlite3.Row,
+        request: StreamTurnComplete,
+    ) -> None:
+        now = utc_now()
+        assistant_message_id = new_id("message")
+        conn.execute(
+            """
+            INSERT INTO messages (
+                id, session_id, user_id, role, content, created_at, emotion_label, importance_score
+            ) VALUES (?, ?, ?, 'assistant', ?, ?, NULL, NULL)
+            """,
+            (
+                assistant_message_id,
+                record_row["session_id"],
+                record_row["user_id"],
+                request.assistant_response,
+                now,
+            ),
+        )
+
+        columns = self._relationship_columns(conn)
+        key_column = "character_id" if "character_id" in columns else "character_name"
+        relationship_row = conn.execute(
+            f"""
+            SELECT mood, user_emotion, trust, affection, familiarity,
+                   current_scene, last_topic, updated_at
+            FROM relationship_states
+            WHERE user_id = ? AND {key_column} = ?
+            LIMIT 1
+            """,
+            (record_row["user_id"], record_row["active_character_id"]),
+        ).fetchone()
+        current = self._stream_relationship_from_row(relationship_row)
+        updated = apply_stream_turn_state_update(
+            current=current,
+            update=request.state_update,
+            updated_at=now,
+        )
+        if relationship_row is None:
+            insert_columns = [
+                "id",
+                "user_id",
+                "mood",
+                "user_emotion",
+                "trust",
+                "affection",
+                "familiarity",
+                "current_scene",
+                "last_topic",
+                "updated_at",
+            ]
+            insert_values: list[object] = [
+                new_id("relation"),
+                record_row["user_id"],
+                updated.mood,
+                updated.user_emotion,
+                updated.trust,
+                updated.affection,
+                updated.familiarity,
+                updated.current_scene,
+                updated.last_topic,
+                updated.updated_at,
+            ]
+            if "character_id" in columns:
+                insert_columns.insert(2, "character_id")
+                insert_values.insert(2, record_row["active_character_id"])
+            if "character_name" in columns:
+                insert_columns.insert(2, "character_name")
+                insert_values.insert(2, record_row["active_character_id"])
+            placeholders = ", ".join("?" for _ in insert_columns)
+            conn.execute(
+                f"INSERT INTO relationship_states ({', '.join(insert_columns)}) "
+                f"VALUES ({placeholders})",
+                insert_values,
+            )
+        else:
+            conn.execute(
+                f"""
+                UPDATE relationship_states
+                SET mood = ?, user_emotion = ?, trust = ?, affection = ?, familiarity = ?,
+                    current_scene = ?, last_topic = ?, updated_at = ?
+                WHERE user_id = ? AND {key_column} = ?
+                """,
+                (
+                    updated.mood,
+                    updated.user_emotion,
+                    updated.trust,
+                    updated.affection,
+                    updated.familiarity,
+                    updated.current_scene,
+                    updated.last_topic,
+                    updated.updated_at,
+                    record_row["user_id"],
+                    record_row["active_character_id"],
+                ),
+            )
+        conn.execute(
+            """
+            UPDATE chat_request_idempotency
+            SET assistant_message_id = ?, status = 'completed', warnings_json = ?,
+                state_delta_json = ?, terminal_error_code = NULL, terminal_retryable = NULL,
+                terminal_reason = NULL, updated_at = ?, completed_at = ?, failed_at = NULL
+            WHERE id = ? AND status = 'in_progress'
+            """,
+            (
+                assistant_message_id,
+                stream_turn_warnings_json(request.warnings),
+                stream_turn_state_delta_json(request.state_update),
+                now,
+                now,
+                record_row["id"],
+            ),
+        )
+
+    def _stream_mark_failed(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        record_id: str,
+        error_code: str,
+        retryable: bool,
+        reason: str,
+    ) -> None:
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE chat_request_idempotency
+            SET assistant_message_id = NULL, status = 'failed', warnings_json = '[]',
+                state_delta_json = '{}', terminal_error_code = ?, terminal_retryable = ?,
+                terminal_reason = ?, updated_at = ?, completed_at = NULL, failed_at = ?
+            WHERE id = ? AND status = 'in_progress'
+            """,
+            (error_code, int(retryable), reason, now, now, record_id),
+        )
+
+    def _stream_find_by_scope(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        user_id: str,
+        session_id: str,
+        client_message_id: str,
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            """
+            SELECT *
+            FROM chat_request_idempotency
+            WHERE user_id = ? AND session_id = ? AND client_message_id = ?
+            LIMIT 1
+            """,
+            (user_id, session_id, client_message_id),
+        ).fetchone()
+
+    def _stream_require_record(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        record_id: str,
+        turn_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> sqlite3.Row:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM chat_request_idempotency
+            WHERE id = ? AND turn_id = ? AND user_id = ? AND session_id = ?
+            LIMIT 1
+            """,
+            (record_id, turn_id, user_id, session_id),
+        ).fetchone()
+        if row is None:
+            raise StorageMigrationRequiredError(reason="streaming_chat_record_not_found")
+        return row
+
+    def _stream_require_owned_session(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str,
+        user_id: str,
+        active_character_id: str,
+    ) -> sqlite3.Row:
+        row = conn.execute(
+            "SELECT id, user_id, character_id, status FROM sessions WHERE id = ? LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            raise SessionNotFoundError("stream_turn_session_not_found")
+        if row["user_id"] != user_id or row["character_id"] != active_character_id:
+            raise SessionOwnershipError("stream_turn_session_ownership_invalid")
+        return row
+
+    def _stream_replay_outcome(
+        self,
+        conn: sqlite3.Connection,
+        record: StreamRequestRecord,
+    ) -> StreamTurnResolveOutcome:
+        if record.status == "failed":
+            return StreamTurnResolveOutcome(kind="replay_failed", record=record)
+        if record.status != "completed" or record.assistant_message_id is None:
+            raise StorageMigrationRequiredError(reason="streaming_chat_replay_record_invalid")
+        row = conn.execute(
+            """
+            SELECT id, session_id, user_id, role, content, created_at,
+                   emotion_label, importance_score
+            FROM messages
+            WHERE id = ? AND session_id = ? AND user_id = ? AND role = 'assistant'
+            LIMIT 1
+            """,
+            (record.assistant_message_id, record.session_id, record.user_id),
+        ).fetchone()
+        if row is None:
+            raise StorageMigrationRequiredError(reason="streaming_chat_replay_assistant_invalid")
+        return StreamTurnResolveOutcome(
+            kind="replay_completed",
+            record=record,
+            assistant_message=MessageRecord(**dict(row)),
+        )
+
+    def _stream_matches_fingerprint(
+        self,
+        row: sqlite3.Row,
+        request: StreamTurnResolveOrReserve,
+    ) -> bool:
+        return (
+            row["request_fingerprint_version"] == request.request_fingerprint_version
+            and row["request_fingerprint"] == request.request_fingerprint
+        )
+
+    def _stream_record_from_row(self, row: sqlite3.Row) -> StreamRequestRecord:
+        status = row["status"]
+        if status not in {"in_progress", "completed", "failed"}:
+            raise StorageMigrationRequiredError(reason="streaming_chat_record_status_invalid")
+        try:
+            warnings = parse_stream_turn_warnings(row["warnings_json"])
+            state_delta = parse_stream_turn_state_delta(
+                row["state_delta_json"],
+                status=status,
+            )
+        except (TypeError, ValueError) as exc:
+            raise StorageMigrationRequiredError(
+                reason="streaming_chat_record_payload_invalid"
+            ) from exc
+        if row["terminal_retryable"] not in {None, 0, 1}:
+            raise StorageMigrationRequiredError(reason="streaming_chat_record_terminal_invalid")
+        return StreamRequestRecord(
+            id=row["id"],
+            user_id=row["user_id"],
+            session_id=row["session_id"],
+            client_message_id=row["client_message_id"],
+            active_character_id=row["active_character_id"],
+            request_fingerprint_version=row["request_fingerprint_version"],
+            request_fingerprint=row["request_fingerprint"],
+            turn_id=row["turn_id"],
+            user_message_id=row["user_message_id"],
+            assistant_message_id=row["assistant_message_id"],
+            status=status,
+            owner_runtime_id=row["owner_runtime_id"],
+            warnings=warnings,
+            state_delta=state_delta,
+            terminal_error_code=row["terminal_error_code"],
+            terminal_retryable=(
+                bool(row["terminal_retryable"])
+                if row["terminal_retryable"] is not None
+                else None
+            ),
+            terminal_reason=row["terminal_reason"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            completed_at=row["completed_at"],
+            failed_at=row["failed_at"],
+        )
+
+    def _stream_relationship_from_row(self, row: sqlite3.Row | None) -> RelationshipState | None:
+        if row is None:
+            return None
+        return RelationshipState(
+            mood=row["mood"] or "calm",
+            user_emotion=row["user_emotion"] or "neutral",
+            trust=row["trust"] if row["trust"] is not None else 50,
+            affection=row["affection"] if row["affection"] is not None else 50,
+            familiarity=row["familiarity"] if row["familiarity"] is not None else 50,
+            current_scene=row["current_scene"] or "default_chat",
+            last_topic=row["last_topic"],
+            updated_at=row["updated_at"],
+        )

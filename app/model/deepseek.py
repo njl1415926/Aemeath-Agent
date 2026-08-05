@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import json
 import math
 import time
+from contextlib import ExitStack, contextmanager
 from threading import Lock
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import httpx
 
 from app.errors import AemeathError, ErrorCode, map_exception, redact_sensitive
+from app.model.streaming import (
+    ModelStreamEvent,
+    ModelStreamFinished,
+    ModelStreamRequest,
+    ModelTextDelta,
+)
 from app.observability.noop import NoopAppLogger
 from app.observability.ports import AppLoggerPort
 from app.observability.schemas import AppLogRecord
@@ -111,6 +119,12 @@ class DeepSeekClient:
             payload["reasoning_effort"] = reasoning_effort
         return payload
 
+    def _build_stream_payload(self, *, messages: list[dict[str, str]]) -> dict:
+        payload = self._build_payload(messages=messages)
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": False}
+        return payload
+
     def chat(self, *, messages: list[dict[str, str]]) -> str:
         started = time.monotonic()
         try:
@@ -190,6 +204,109 @@ class DeepSeekClient:
                 self._sleep_before_retry(attempt_index, response)
                 continue
             retry_after = self._retry_after(response) if status == 429 else None
+            raise _model_error(
+                code,
+                reason,
+                attempt_index + 1,
+                retry_after_seconds=retry_after,
+            )
+        raise AssertionError("unreachable")
+
+    @contextmanager
+    def open_stream(
+        self,
+        *,
+        request: ModelStreamRequest,
+    ) -> Iterator[DeepSeekModelStreamSession]:
+        with self._close_lock:
+            if self._closed:
+                raise _model_error(ErrorCode.MODEL_UNAVAILABLE, "deepseek_client_closed")
+        payload = self._build_stream_payload(messages=request.messages)
+        for attempt_index in range(self.max_retries + 1):
+            stack = ExitStack()
+            try:
+                response = stack.enter_context(
+                    self._client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
+                )
+            except httpx.PoolTimeout as exc:
+                stack.close()
+                raise RuntimeBusyError("model_connection_pool") from exc
+            except httpx.ReadTimeout as exc:
+                stack.close()
+                raise _model_error(
+                    ErrorCode.MODEL_TIMEOUT,
+                    "model_read_timeout",
+                    attempt_index + 1,
+                ) from exc
+            except httpx.WriteTimeout as exc:
+                stack.close()
+                raise _model_error(
+                    ErrorCode.MODEL_TIMEOUT,
+                    "model_write_timeout",
+                    attempt_index + 1,
+                ) from exc
+            except httpx.ConnectTimeout as exc:
+                stack.close()
+                if self._has_retry_left(attempt_index):
+                    self._sleep_before_retry(attempt_index, None)
+                    continue
+                raise _model_error(
+                    ErrorCode.MODEL_TIMEOUT,
+                    "model_connect_timeout",
+                    attempt_index + 1,
+                ) from exc
+            except httpx.ConnectError as exc:
+                stack.close()
+                if self._has_retry_left(attempt_index):
+                    self._sleep_before_retry(attempt_index, None)
+                    continue
+                raise _model_error(
+                    ErrorCode.MODEL_UNAVAILABLE,
+                    "model_connect_error",
+                    attempt_index + 1,
+                ) from exc
+            except httpx.RequestError as exc:
+                stack.close()
+                raise _model_error(
+                    ErrorCode.MODEL_UNAVAILABLE,
+                    "model_request_error",
+                    attempt_index + 1,
+                ) from exc
+            except Exception as exc:
+                stack.close()
+                raise _model_error(
+                    ErrorCode.MODEL_UNAVAILABLE,
+                    "model_request_error",
+                    attempt_index + 1,
+                ) from exc
+
+            status = response.status_code
+            if status == 200:
+                session = DeepSeekModelStreamSession(
+                    response=response,
+                    attempt_count=attempt_index + 1,
+                    close_response=stack.close,
+                )
+                try:
+                    yield session
+                finally:
+                    session.close()
+                return
+
+            code, reason, retryable = _classify_status(status)
+            retry_after = self._retry_after(response) if status == 429 else None
+            stack.close()
+            if retryable and self._has_retry_left(attempt_index):
+                self._sleep_before_retry(attempt_index, response)
+                continue
             raise _model_error(
                 code,
                 reason,
@@ -292,6 +409,177 @@ class DeepSeekClient:
         return f"DeepSeekClient(model={self.model}, base_url={self.base_url})"
 
 
+class DeepSeekSSEParser:
+    def __init__(self, *, attempt_count: int) -> None:
+        self._attempt_count = attempt_count
+        self._content_parts: list[str] = []
+        self._finish_reason: str | None = None
+        self._done = False
+
+    def feed_data(self, data: str) -> tuple[ModelStreamEvent, ...]:
+        if self._done:
+            raise self._invalid("model_stream_data_after_done")
+        if data == "[DONE]":
+            if self._finish_reason is None:
+                raise self._invalid("model_finish_reason_missing")
+            if not "".join(self._content_parts).strip():
+                raise self._invalid("model_response_blank")
+            self._done = True
+            finish_kind = (
+                "complete" if self._finish_reason == "stop" else "output_limit"
+            )
+            return (ModelStreamFinished(finish_kind=finish_kind),)
+        try:
+            payload = json.loads(data)
+            if not isinstance(payload, dict):
+                raise ValueError
+            choices = payload["choices"]
+            if not isinstance(choices, list):
+                raise ValueError
+            if not choices:
+                if not isinstance(payload.get("usage"), dict):
+                    raise ValueError
+                return ()
+            if len(choices) != 1:
+                raise ValueError
+            choice = choices[0]
+            if not isinstance(choice, dict) or choice.get("index") != 0:
+                raise ValueError
+            if self._finish_reason is not None:
+                raise self._invalid("model_stream_data_after_finish_reason")
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                raise ValueError
+            tool_calls = delta.get("tool_calls")
+            if tool_calls not in (None, []):
+                raise self._invalid("model_tool_calls_unsupported")
+            content = delta.get("content")
+            if content is not None and not isinstance(content, str):
+                raise ValueError
+            finish_reason = choice.get("finish_reason")
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                raise ValueError
+        except AemeathError:
+            raise
+        except Exception as exc:
+            raise self._invalid("model_stream_chunk_invalid") from exc
+
+        events: list[ModelStreamEvent] = []
+        if content:
+            self._content_parts.append(content)
+            events.append(ModelTextDelta(text=content))
+        if finish_reason is not None:
+            self._accept_finish_reason(finish_reason)
+        return tuple(events)
+
+    def finalize(self) -> None:
+        if not self._done:
+            raise self._invalid("model_stream_incomplete")
+
+    def _accept_finish_reason(self, finish_reason: str) -> None:
+        if finish_reason in {"stop", "length"}:
+            self._finish_reason = finish_reason
+            return
+        if finish_reason == "content_filter":
+            raise self._invalid("model_content_filtered")
+        if finish_reason == "tool_calls":
+            raise self._invalid("model_tool_calls_unsupported")
+        if finish_reason == "insufficient_system_resource":
+            raise _model_error(
+                ErrorCode.MODEL_UNAVAILABLE,
+                "model_insufficient_system_resource",
+                self._attempt_count,
+            )
+        raise self._invalid("model_finish_reason_invalid")
+
+    def _invalid(self, reason: str) -> AemeathError:
+        return _model_error(
+            ErrorCode.MODEL_INVALID_RESPONSE,
+            reason,
+            self._attempt_count,
+        )
+
+
+class DeepSeekModelStreamSession:
+    def __init__(
+        self,
+        *,
+        response: Any,
+        attempt_count: int,
+        close_response: Callable[[], None],
+    ) -> None:
+        self._response = response
+        self._attempt_count = attempt_count
+        self._close_response = close_response
+        self._lock = Lock()
+        self._closed = False
+        self._cancelled = False
+        self._iterated = False
+
+    def __iter__(self) -> Iterator[ModelStreamEvent]:
+        with self._lock:
+            if self._iterated:
+                raise RuntimeError("model_stream_session_already_iterated")
+            self._iterated = True
+        parser = DeepSeekSSEParser(attempt_count=self._attempt_count)
+        try:
+            for data in _iter_sse_data(
+                self._response.iter_lines(),
+                attempt_count=self._attempt_count,
+            ):
+                with self._lock:
+                    if self._cancelled or self._closed:
+                        return
+                for event in parser.feed_data(data):
+                    yield event
+                    if isinstance(event, ModelStreamFinished):
+                        return
+            parser.finalize()
+        except httpx.ReadTimeout as exc:
+            if self._is_cancelled_or_closed():
+                return
+            raise _model_error(
+                ErrorCode.MODEL_TIMEOUT,
+                "model_read_timeout",
+                self._attempt_count,
+            ) from exc
+        except httpx.RequestError as exc:
+            if self._is_cancelled_or_closed():
+                return
+            raise _model_error(
+                ErrorCode.MODEL_UNAVAILABLE,
+                "model_stream_read_error",
+                self._attempt_count,
+            ) from exc
+        except AemeathError:
+            raise
+        except Exception as exc:
+            if self._is_cancelled_or_closed():
+                return
+            raise _model_error(
+                ErrorCode.MODEL_UNAVAILABLE,
+                "model_stream_read_error",
+                self._attempt_count,
+            ) from exc
+
+    def cancel(self, *, reason: str) -> None:
+        del reason
+        with self._lock:
+            self._cancelled = True
+        self.close()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._close_response()
+
+    def _is_cancelled_or_closed(self) -> bool:
+        with self._lock:
+            return self._cancelled or self._closed
+
+
 class FallbackChatModelClient:
     def __init__(self, *, primary, fallback):
         self.primary = primary
@@ -307,6 +595,40 @@ class FallbackChatModelClient:
                 "Model service is temporarily unavailable; using local fallback. "
                 f"{self.fallback.chat(messages=messages)}"
             )
+
+
+def _iter_sse_data(
+    lines: Iterator[str],
+    *,
+    attempt_count: int,
+) -> Iterator[str]:
+    data_lines: list[str] = []
+    for line in lines:
+        if not isinstance(line, str):
+            raise _model_error(
+                ErrorCode.MODEL_INVALID_RESPONSE,
+                "model_stream_line_invalid",
+                attempt_count,
+            )
+        if line == "":
+            if data_lines:
+                yield "\n".join(data_lines)
+                data_lines.clear()
+            continue
+        if line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            raise _model_error(
+                ErrorCode.MODEL_INVALID_RESPONSE,
+                "model_stream_field_invalid",
+                attempt_count,
+            )
+        value = line[5:]
+        if value.startswith(" "):
+            value = value[1:]
+        data_lines.append(value)
+    if data_lines:
+        yield "\n".join(data_lines)
 
 
 def _classify_status(status: int) -> tuple[ErrorCode, str, bool]:

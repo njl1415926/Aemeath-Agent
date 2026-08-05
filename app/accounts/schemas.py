@@ -17,3 +17,4 @@ class AccountRecord:
     created_at: str = ""
     updated_at: str = ""
     last_login_at: str | None = None
+    username_normalized: str = ""

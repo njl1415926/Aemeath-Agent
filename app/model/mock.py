@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from app.model.mock_streaming import MockStreamingChatModelClient
+
+__all__ = ["MockChatModelClient", "MockStreamingChatModelClient"]
+
 
 class MockChatModelClient:
     def chat(self, *, messages: list[dict[str, str]]) -> str:
@@ -31,4 +35,3 @@ def _recall_from_system_context(system_content: str) -> str:
             memory_content = line.split("): ", 1)[-1]
             return f"我记得，我们之前提到过：{memory_content}"
     return "我记得我们聊过很重要的事，但这次我没能准确找到那条记忆。"
-

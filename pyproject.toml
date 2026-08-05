@@ -5,6 +5,7 @@ description = "Aemeath Agent v0.3 CLI roleplay dialogue agent"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "argon2-cffi>=25.1,<26",
   "numpy>=1.26.0",
   "python-dotenv>=1.0.1",
   "PyYAML>=6.0.1",

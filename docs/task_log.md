@@ -2113,3 +2113,167 @@ Manager D4 revalidation on 2026-07-31:
 - D4 is `accepted`. T-0140 remains `pending`; D6 is authorized to begin under the approved staged
   design. D5 remains blocked on its separately approved WAL/busy-timeout and fenced
   lease/stale-recovery gates.
+
+### T-0141 Invitation-only Web MVP Contract v0.1
+
+Status: `done`
+
+Owner:
+- Manager Session.
+
+Deliverable:
+- `docs/web_mvp_contract.md` freezes the invitation-only product scope, same-origin static frontend,
+  browser Cookie Session/CSRF boundary, invitation and operator-assisted reset flows, planned data
+  semantics, HTTP endpoints, streaming event contract, frontend/security/cost constraints, Worker
+  ownership, test gates, and implementation sequence.
+- `docs/architecture.md` and `docs/interfaces.md` distinguish this frozen target from currently
+  implemented runtime capability.
+
+Manager decisions:
+- v0.1 has no public registration, email, OAuth, browser admin, billing, Audio, Memory Worker, or
+  vector-RAG activation.
+- Production Web never exposes the dev Bearer token. It uses an opaque server-side host-only Cookie
+  Session with CSRF/origin protections, while Web Auth Session and dialogue Session remain separate.
+- React/TypeScript/Vite builds static assets served by Caddy on the API origin; no Node.js process is
+  added to production.
+- True streaming is required, but HTTP/SSE types may not enter Controller or domain ports.
+- Each implementation task remains design-first and requires Manager acceptance.
+
+### T-0142 Browser Auth And Invitations v0.1
+
+Status: `done`
+
+Scope:
+- invitation/admin CLI, normalized usernames, Argon2id credentials, browser sessions, CSRF,
+  operator-assisted password reset, Auth API, raw/SQLAlchemy persistence parity, errors and tests.
+
+Gate:
+- Worker submits schema/port/error/migration design before implementation. No production Bearer and
+  Cookie dual-auth ambiguity is allowed.
+
+Manager design acceptance (2026-08-04):
+- Accepted `docs/agents_communication/browser_auth_invitations_v0_1_design.md` after the requested
+  migration, credential-version, token-preflight, observability, and invitation-state revisions.
+- Authorized implementation phases A1-A6. The Worker must keep D4's accepted Bearer deployment
+  baseline unchanged, must not modify `frontend/` or `DialogueController`, and must leave D6
+  backup/restore outside this task.
+- Final acceptance still requires raw SQLite/SQLAlchemy parity, Python 3.10 single-CPU Argon2
+  qualification, focused/full tests, content-safe fault tests, and a Manager delivery review.
+
+Manager implementation review (2026-08-04):
+- Status remains `in_progress`; final acceptance is `Changes Requested`.
+- Independent verification passed 46 focused Browser Auth tests and the full Windows suite
+  (`640 passed, 1 skipped`), plus scoped Ruff, compileall, deploy-lock, and diff checks.
+- Blocking repairs: exact fail-closed trigger/partial-index schema validation, pre-auth global/IP
+  admission before body parsing, and removal of direct Auth-domain dependency on the concrete
+  `BrowserAuthRepository` in favor of completed narrow ports.
+- Bounded invitation-list cursor support may be deferred for the small launch if recorded explicitly.
+- Detailed evidence and repair criteria are in
+  `docs/agents_communication/browser_auth_invitations_v0_1_manager_review.md`.
+
+Manager final acceptance (2026-08-04):
+- Accepted all three narrow repairs: exact fail-closed schema comparison, body-parse-independent
+  global/IP pre-auth admission with a separate identity bucket, and Auth-domain dependency on
+  complete persistence protocols instead of concrete repositories.
+- Independent verification passed 63 focused Browser Auth tests and the full Windows suite
+  (`657 passed, 1 skipped`; `658` collected), plus scoped Ruff, compileall, deploy-lock, and diff
+  checks.
+- Cursor pagination for `list-invites` and a PostgreSQL Auth adapter are documented follow-ups and
+  do not block the SQLite-backed invitation-only small launch.
+- T-0142 is `done`. Production Web-profile activation, real-browser/Caddy acceptance, streaming,
+  frontend work, and D6 backup/restore remain governed by T-0140 and T-0143 through T-0146.
+
+### T-0143 Streaming Chat Runtime And API v0.1
+
+Status: `in_progress`
+
+Scope:
+- true model streaming, domain stream events, `/v1/chat/stream`, cancellation, idempotency,
+  persistence, admission/resource lifetime, content-safe observability, and regression tests.
+
+Gate:
+- Worker submits Controller/model/service integration design before code. Provider reasoning and
+  stream content must not leak through public events or logs.
+
+Manager design review (2026-08-04):
+- Status is `Changes Requested`; implementation remains unauthorized.
+- The provider-neutral streaming Port, shared `DialogueTurnEngine`, SSE adapter boundary, durable
+  idempotency direction, and narrow completion UoW are accepted in principle.
+- Required revisions cover volatile `request_id` contamination of the idempotency fingerprint,
+  DeepSeek `finish_reason` and empty-response semantics, an explicitly transferable admission lease,
+  an event-loop-safe producer/SSE bridge, Session lifecycle checks on replay, and latest-row atomic
+  relationship updates.
+- Manager decisions and complete repair criteria are recorded in
+  `docs/agents_communication/streaming_chat_runtime_v0_1_manager_review.md`.
+
+Manager design re-review (2026-08-04):
+- Accepted all six repairs and froze per-key registry capacity at 128.
+- Clarified that persistence stores fallback-resolved `active_character_id`, while the requested
+  character ID remains part of fingerprint v1.
+- Authorized Worker 19 to implement S1 and S3, and the Persistence owner to implement S2 with raw
+  SQLite/SQLAlchemy-on-SQLite parity.
+- S4-S7 remain blocked until the S1/S2/S3 checkpoint is accepted. T-0143 is `in_progress`; only
+  Manager final delivery review may mark it `done`.
+
+Manager S1/S3 checkpoint (2026-08-04):
+- Accepted the shared `DialogueTurnEngine` extraction and synchronous Controller compatibility
+  evidence with no blocking or non-blocking finding.
+- Accepted the provider-neutral stream contracts, deterministic mock, and fail-closed DeepSeek SSE
+  parser foundation. No Persistence, streaming service, SSE endpoint, runtime registry, or frontend
+  work was included.
+- Independent verification passed 25 focused tests and the full suite (`682 passed, 1 skipped`),
+  plus scoped Ruff, compileall, and diff checks.
+- Repository-wide Ruff remains blocked only by the pre-existing out-of-scope
+  `frontend/capture_frontend.py:17:1 I001`.
+- Persistence S2 is still pending. S4-S7 remain blocked, and T-0143 stays `in_progress`.
+
+Manager S2 checkpoint review (2026-08-05):
+- Accepted the S2 persistence architecture, strict migration direction, narrow transaction/UoW,
+  raw SQLite/SQLAlchemy-on-SQLite parity, Session replay checks, and concurrency behavior.
+- Status is `Changes Requested`: the persisted terminal-reason vocabulary must align with the
+  frozen cancellation contract and use an explicit provider-to-domain mapping; completed record
+  hydration must require all three state-delta keys rather than accepting a subset.
+- Independent verification passed 24 focused tests, all 100 store-contract tests, and the full
+  suite with one existing skip; scoped Ruff and compileall passed.
+- S1/S3 remain accepted. S2 is not yet accepted, S4-S7 remain blocked, and T-0143 stays
+  `in_progress`.
+
+Manager S2 re-review (2026-08-05):
+- Accepted the 12-value provider-neutral terminal vocabulary, explicit S4 model-category mapping,
+  strict status-dependent state-delta hydration, and atomic v0.1-to-v0.2 schema upgrade.
+- Independent verification passed 58 focused S2 tests, the complete store-contract suite, and the
+  full suite with one existing skip; scoped Ruff, compileall, and diff checks passed.
+- The S1/S2/S3 prerequisite checkpoint is complete. Worker 19 may proceed through S4-S7 in the
+  frozen implementation order. T-0143 remains `in_progress` pending final Manager delivery review.
+
+### T-0144 Web Session API Completion v0.1
+
+Status: `pending`
+
+Scope:
+- title update, end/resume/archive endpoints, cursor pagination, Web DTOs, ownership and lifecycle
+  tests. No browser hard-delete endpoint in v0.1.
+
+### T-0145 React/Vite Web Frontend v0.1
+
+Status: `pending`
+
+Scope:
+- invitation/login/chat screens, Session navigation, text streaming, stop/retry/error/expiry states,
+  desktop/mobile accessibility, static build and API integration.
+
+Gate:
+- API/Auth/stream contracts must be frozen. No credential or token may be stored in browser storage,
+  source, build artifacts, or analytics.
+
+### T-0146 Web Security, Quota, And E2E Gate v0.1
+
+Status: `pending`
+
+Scope:
+- pre-auth abuse controls, per-account usage quota, CSP/security headers, cross-user/security fault
+  tests, Playwright desktop/mobile workflows, Caddy static integration, and D8 evidence inputs.
+
+Gate:
+- This task does not replace T-0140 D6/D7/D8. D6 may proceed after T-0142 schema freeze; D8 performs
+  final real-cloud Web acceptance.

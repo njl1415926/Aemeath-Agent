@@ -70,8 +70,22 @@ def error_response(*, request: Request, error_info: ErrorInfo) -> JSONResponse:
         and retry_after >= 0
     ):
         headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
-    return JSONResponse(
+    response = JSONResponse(
         status_code=http_status_for_error(error_info),
         content=content,
         headers=headers or None,
     )
+    if request.url.path.startswith("/v1/auth/"):
+        response.headers["Cache-Control"] = "no-store"
+    if getattr(request.state, "clear_web_session_cookie", False):
+        response.set_cookie(
+            key="__Host-aemeath_session",
+            value="",
+            max_age=0,
+            expires=0,
+            secure=True,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    return response

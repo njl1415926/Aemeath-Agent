@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from app.schemas import MessageRecord
 from app.services.schemas import ChatResponse, UsedMemorySummary
@@ -73,8 +73,7 @@ class ChatResponseBody(BaseModel):
             used_memory_ids=response.used_memory_ids,
             state_delta=response.state_delta,
             used_memories=[
-                UsedMemoryResponse.from_service(memory)
-                for memory in response.used_memories
+                UsedMemoryResponse.from_service(memory) for memory in response.used_memories
             ],
         )
 
@@ -147,3 +146,34 @@ class MessageResponseBody(BaseModel):
 
 class SessionMessagesResponseBody(BaseModel):
     messages: list[MessageResponseBody]
+
+
+class InvitationAcceptBody(BaseModel):
+    token: SecretStr
+    password: SecretStr
+
+
+class LoginBody(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: SecretStr
+
+
+class PasswordChangeBody(BaseModel):
+    current_password: SecretStr
+    new_password: SecretStr
+
+
+class PasswordResetAcceptBody(BaseModel):
+    token: SecretStr
+    new_password: SecretStr
+
+
+class MeResponse(BaseModel):
+    account_id: str
+    username: str
+    display_name: str | None
+    roles: list[str]
+
+
+class CsrfResponse(BaseModel):
+    csrf_token: str

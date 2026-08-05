@@ -28,6 +28,7 @@ class AccountRepository:
         return AccountRecord(
             id=model.id,
             username=model.username,
+            username_normalized=model.username_normalized,
             display_name=model.display_name,
             status=model.status,  # type: ignore[arg-type]
             roles=[str(item) for item in load_json_list(model.roles_json)],
@@ -74,6 +75,7 @@ class AccountRepository:
                 account = AccountModel(
                     id=account_id,
                     username=username,
+                    username_normalized=username.lower(),
                     display_name=display_name,
                     status=status,
                     roles_json=roles_json,
@@ -84,7 +86,6 @@ class AccountRepository:
                 )
                 session.add(account)
             else:
-                account.username = username
                 account.display_name = display_name
                 account.status = status
                 account.roles_json = roles_json

@@ -6,6 +6,7 @@ from pathlib import Path
 _MAX_SECRET_BYTES = 8192
 DEEPSEEK_SECRET_PATH = Path("/run/secrets/deepseek_api_key")
 API_BEARER_SECRET_PATH = Path("/run/secrets/api_bearer_token")
+WEB_AUTH_CSRF_SECRET_PATH = Path("/run/secrets/web_auth_csrf_key")
 
 
 def resolve_secret(

@@ -15,6 +15,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_created
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
+    username_normalized TEXT NOT NULL DEFAULT '',
     display_name TEXT,
     status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
     roles_json TEXT NOT NULL DEFAULT '["user"]',
@@ -50,6 +51,62 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS chat_request_idempotency (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    client_message_id TEXT NOT NULL,
+    active_character_id TEXT NOT NULL,
+    request_fingerprint_version INTEGER NOT NULL CHECK (request_fingerprint_version >= 1),
+    request_fingerprint TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    user_message_id TEXT NOT NULL,
+    assistant_message_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
+    owner_runtime_id TEXT NOT NULL,
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    state_delta_json TEXT NOT NULL DEFAULT '{}',
+    terminal_error_code TEXT,
+    terminal_retryable INTEGER CHECK (terminal_retryable IN (0, 1) OR terminal_retryable IS NULL),
+    terminal_reason TEXT CHECK (
+        terminal_reason IS NULL OR terminal_reason IN (
+            'user_cancelled', 'client_disconnected', 'sse_generator_closed', 'consumer_slow',
+            'runtime_closing', 'model_failed', 'model_invalid_response',
+            'preparation_failed', 'runtime_interrupted', 'runtime_orphaned',
+            'session_archived', 'session_ended'
+        )
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    failed_at TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (user_message_id) REFERENCES messages(id) ON DELETE RESTRICT,
+    FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE RESTRICT,
+    CHECK (
+        (status = 'in_progress' AND assistant_message_id IS NULL AND completed_at IS NULL
+            AND failed_at IS NULL AND terminal_error_code IS NULL
+            AND terminal_retryable IS NULL AND terminal_reason IS NULL
+            AND warnings_json = '[]' AND state_delta_json = '{}')
+        OR
+        (status = 'completed' AND assistant_message_id IS NOT NULL AND completed_at IS NOT NULL
+            AND failed_at IS NULL AND terminal_error_code IS NULL
+            AND terminal_retryable IS NULL AND terminal_reason IS NULL)
+        OR
+        (status = 'failed' AND assistant_message_id IS NULL AND completed_at IS NULL
+            AND failed_at IS NOT NULL AND terminal_error_code IS NOT NULL
+            AND terminal_retryable IN (0, 1) AND terminal_reason IS NOT NULL
+            AND warnings_json = '[]' AND state_delta_json = '{}')
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_request_idempotency_scope
+    ON chat_request_idempotency (user_id, session_id, client_message_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_request_idempotency_turn
+    ON chat_request_idempotency (turn_id);
+CREATE INDEX IF NOT EXISTS idx_chat_request_idempotency_orphan
+    ON chat_request_idempotency (status, owner_runtime_id, updated_at, id);
 
 CREATE TABLE IF NOT EXISTS long_term_memories (
     id TEXT PRIMARY KEY,
