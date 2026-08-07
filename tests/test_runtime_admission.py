@@ -68,3 +68,44 @@ def test_session_wait_timeout_is_busy_and_does_not_leak_entry():
         assert raised.value.reason == "session_lock_wait_timeout"
         assert admission.entry_count == 1
     assert admission.entry_count == 0
+
+
+def test_explicit_handle_can_close_cross_thread_repeatedly() -> None:
+    admission = _admission(dialogue_limit=1)
+    handle = admission.open_handle(
+        request=DialogueAdmissionRequest(user_id="u1", session_id="s1")
+    )
+    assert admission.entry_count == 1
+
+    threads = [Thread(target=handle.close) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert admission.entry_count == 0
+    handle.close()
+    with admission.acquire(
+        request=DialogueAdmissionRequest(user_id="u1", session_id="s1")
+    ):
+        pass
+
+
+def test_explicit_handle_holds_session_and_dialogue_until_close() -> None:
+    admission = _admission(session_wait=0.01, dialogue_limit=1)
+    handle = admission.open_handle(
+        request=DialogueAdmissionRequest(user_id="u1", session_id="s1")
+    )
+    with pytest.raises(RuntimeBusyError) as session_busy:
+        admission.open_handle(
+            request=DialogueAdmissionRequest(user_id="u1", session_id="s1")
+        )
+    assert session_busy.value.reason == "session_lock_wait_timeout"
+    with pytest.raises(RuntimeBusyError) as dialogue_busy:
+        admission.open_handle(
+            request=DialogueAdmissionRequest(user_id="u2", session_id="s2")
+        )
+    assert dialogue_busy.value.reason == "dialogue_concurrency"
+    handle.close()
+    assert admission.entry_count == 0

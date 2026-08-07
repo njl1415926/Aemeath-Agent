@@ -2185,7 +2185,7 @@ Manager final acceptance (2026-08-04):
 
 ### T-0143 Streaming Chat Runtime And API v0.1
 
-Status: `in_progress`
+Status: `done`
 
 Scope:
 - true model streaming, domain stream events, `/v1/chat/stream`, cancellation, idempotency,
@@ -2245,6 +2245,98 @@ Manager S2 re-review (2026-08-05):
   full suite with one existing skip; scoped Ruff, compileall, and diff checks passed.
 - The S1/S2/S3 prerequisite checkpoint is complete. Worker 19 may proceed through S4-S7 in the
   frozen implementation order. T-0143 remains `in_progress` pending final Manager delivery review.
+
+Manager S4 checkpoint review (2026-08-05):
+- Accepted the broad S4 architecture and existing main-path regression evidence, but the checkpoint
+  status is `Changes Requested`.
+- Blocking repairs cover registry-close/register cleanup after reserve, atomic `start()`/`close()`
+  state transitions, and preservation of the immutable completed/failed terminal identity during
+  replay delivery failure or cancellation.
+- Independent verification passed 135 focused tests and the full suite (`778 passed, 1 skipped`),
+  plus scoped Ruff, compileall, and diff checks. Three deterministic fault probes reproduced the
+  uncovered races/terminal mismatch.
+- Detailed evidence and repair criteria are in
+  `docs/agents_communication/streaming_chat_runtime_v0_1_manager_review.md`. S5-S7 remain blocked and
+  T-0143 stays `in_progress`.
+
+Manager S4 re-review (2026-08-05):
+- Accepted registration-failure cleanup and Trace ordering, the atomic handle start/close state
+  machine, and immutable replay terminal behavior after delivery failure or cancellation.
+- Independent verification passed all 9 deterministic fault cases, 144 expanded focused tests, and
+  the full suite (`787 passed, 1 skipped`), plus scoped Ruff, compileall, and diff checks.
+- No blocking or non-blocking S4 defect remains. S5 API/SSE adapter implementation is authorized as
+  the next isolated phase; Worker 19 must stop after S5 for another Manager checkpoint. S6-S7 remain
+  blocked and T-0143 stays `in_progress`.
+
+Manager S5 checkpoint review (2026-08-06):
+- Accepted the endpoint boundary, SSE framing, bounded FIFO bridge, normal terminal ordering,
+  Auth/CSRF/request-ID integration, shared sync/stream rate limit, and main disconnect direction.
+- Status is `Changes Requested`: a producer `Thread.start()` failure currently terminalizes on the
+  event loop and closes the HTTP 200 stream after `turn.started` without a business terminal.
+- Disconnect cleanup also invokes `handle.cancel()` on the event loop; the production DeepSeek
+  implementation can synchronously close HTTPX there and stall the single Uvicorn worker.
+- Independent verification passed 191 expanded focused tests and the full suite
+  (`797 passed, 1 skipped`), plus scoped Ruff, compileall, and diff checks. Two deterministic probes
+  reproduced the uncovered failure modes.
+- Detailed repair criteria are recorded in
+  `docs/agents_communication/streaming_chat_runtime_v0_1_manager_review.md`. S5 is not accepted,
+  S6-S7 remain blocked, and T-0143 stays `in_progress`.
+
+Manager S5 re-review (2026-08-06):
+- Confirmed both original High repairs: thread-start failure terminalizes off-loop with
+  `turn.started -> turn.failed`, and blocking transport cancellation no longer stalls the event
+  loop. Both fault tests passed five consecutive rounds with complete resource release.
+- Status remains `Changes Requested`: aborting a backpressured bridge before recording
+  `client_disconnected` lets the producer first persist `sse_generator_closed`; an actual-handle
+  capacity-one probe reproduced the wrong token and durable reason in five of five runs.
+- Independent verification passed 192 expanded focused tests and the full suite
+  (`798 passed, 1 skipped`), plus scoped Ruff and compileall.
+- The worker must establish cancellation intent before bridge abort can wake a pending producer,
+  while keeping transport close off the event loop, and add the corresponding deterministic test.
+  S6-S7 remain blocked and T-0143 stays `in_progress`.
+
+Manager S5 final re-review (2026-08-06):
+- Accepted the atomic transport-free `request_cancel()` operation and the fixed intent-before-abort,
+  off-loop cancel/close ordering. The actual-handle capacity-one bridge test preserves
+  `client_disconnected` across token, transport, persistence, and Trace and releases every resource.
+- The test's five internal interleavings passed in three consecutive Manager rounds. Independent
+  verification also passed 192 expanded focused tests and the full suite
+  (`799 passed, 1 skipped`), plus scoped Ruff, compileall, and diff checks.
+- S5 is accepted. S6 observability/error/Caddy targeted work is authorized; S7 remains blocked and
+  T-0143 stays `in_progress`.
+- S6 has one mandatory entry finding: ASGI 2.4 `send()` disconnect currently propagates raw
+  `OSError` from the full app and `ClientDisconnect` from the direct response owner. S6 must classify
+  it as `client_disconnected`, suppress the post-header delivery exception after cleanup, and add
+  direct/full-app fault tests without rewriting a durable completion.
+
+Manager S6 checkpoint review (2026-08-06):
+- Accepted the narrow post-header ASGI disconnect boundary. Raw `OSError` and Starlette
+  `ClientDisconnect` now preserve `client_disconnected`, complete off-loop cleanup, and do not escape
+  through the full middleware chain; a durable completion which wins first is not rewritten.
+- Accepted content-safe App Log, Trace, and streaming Prompt Summary coverage. Marker tests found no
+  user text, delta, prompt, credential, vector, provider-body, or raw exception leakage.
+- Accepted the real Caddy 2.10.2 h1/h2 test evidence for live delta delivery, heartbeat, disconnect
+  propagation, 128 KiB body enforcement, ALPN, and no h3 advertisement. `deploy/Caddyfile` remains
+  unchanged and does not use `flush_interval -1`.
+- Independent Manager verification passed the 59-test targeted suite and the full Caddy-enabled suite
+  (`805 passed`), plus scoped Ruff, compileall, deployment-lock, and diff checks.
+- S6 is accepted. S7 final regression and delivery reporting is authorized; T-0143 remains
+  `in_progress` and only Manager final review may mark it `done`.
+
+Manager final acceptance (2026-08-06):
+- Accepted S7 as a regression/documentation-only phase with no runtime, schema, Caddy topology,
+  frontend, or production-profile expansion.
+- Final evidence passed 331 focused S1-S6 tests and the complete Caddy-enabled suite (`805 passed`),
+  plus scoped Ruff, compileall, deployment-lock, and diff checks.
+- S1-S7 now provide shared sync/stream turn orchestration, provider-neutral DeepSeek streaming,
+  durable idempotency and replay, bounded admission/resource ownership, `/v1/chat/stream`, safe
+  cancellation/disconnect handling, and content-safe observability while preserving CLI and
+  `/v1/chat` compatibility.
+- Manager synchronized `docs/architecture.md`, `docs/interfaces.md`, and
+  `docs/web_mvp_contract.md` with the implemented `ChatStreamHandle`, active streaming endpoint, and
+  current task gates.
+- No blocking or non-blocking T-0143 finding remains. T-0143 is `done`; T-0144 Web Session API and
+  T-0140 D6 backup/restore are the next launch-path tasks and may proceed independently.
 
 ### T-0144 Web Session API Completion v0.1
 

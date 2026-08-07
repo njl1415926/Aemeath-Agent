@@ -2,7 +2,311 @@
 
 Date: 2026-08-04
 
-Status: **S1/S2/S3 Checkpoint Accepted / S4-S7 Authorized In Sequence**
+Status: **S1-S7 Accepted / T-0143 Done**
+
+## Final Manager Acceptance
+
+Manager final review on 2026-08-06 accepts the complete T-0143 delivery. S7 introduced no runtime or
+schema change and completed the frozen regression/documentation phase. The implemented system keeps
+sync CLI and `/v1/chat` compatibility, uses one shared `DialogueTurnEngine`, provides durable
+idempotent streaming through `AgentStreamService`, and keeps HTTP/SSE/Auth details outside the core
+domain modules.
+
+Final evidence:
+
+- S1-S6 focused regression: 331 passed;
+- complete suite with real Caddy 2.10.2: 805 passed;
+- scoped Ruff, compileall, deployment lock validation, and `git diff --check`: passed;
+- Manager-owned architecture, interface, Web contract, review, and task documents were reconciled
+  with the implemented `ChatStreamHandle` and active `/v1/chat/stream` boundary.
+
+No blocking or non-blocking T-0143 finding remains. The known single-process, no-offset-resume,
+cooperative-cancellation, and pre-production browser/cloud limits are explicit deferred work, not
+v0.1 contract violations. T-0143 is complete; T-0144 and deployment D6 are the next independent
+launch-path tasks.
+
+## S6 Manager Checkpoint Acceptance
+
+Manager review on 2026-08-06 found no blocking or non-blocking S6 defect:
+
+- the narrow pure-ASGI boundary catches only post-header `OSError` / Starlette
+  `ClientDisconnect` on `/v1/chat/stream`, notifies the response owner, preserves the first-wins
+  `client_disconnected` intent, completes off-loop cleanup, and suppresses the downstream delivery
+  exception;
+- direct-owner and full FastAPI middleware-chain tests prove that an uncommitted turn becomes durable
+  `client_disconnected` with no assistant message and zero admission/LLM-gate/registry ownership;
+- a completion which wins the persistence CAS remains completed when terminal delivery later fails;
+- success/failure marker scans cover App Log, Trace, streaming Prompt Summary, terminal objects, and
+  safe repr output without retaining prompt, delta, credential, vector, provider body, or exception
+  content;
+- the real Caddy 2.10.2 test verifies live HTTP/1.1 and HTTP/2 delta delivery, heartbeat framing,
+  downstream disconnect propagation, the 128 KiB body boundary, h1/h2 ALPN, and no h3 advertisement.
+  `deploy/Caddyfile` remains unchanged and contains no `flush_interval -1`.
+
+Independent Manager verification:
+
+- the five-file S6/API/observability/Caddy targeted suite: 59 passed;
+- full suite with the pinned Caddy binary enabled: 805 passed;
+- `python -m ruff check app tests`, `python -m compileall -q app tests`, deployment lock validation,
+  and `git diff --check`: passed.
+
+The first focused invocation did not reach application code because the chosen Windows `--basetemp`
+parent did not exist; after creating the local ignored parent, the unchanged test selection passed.
+This is a test-harness prerequisite, not a product defect.
+
+S6 is accepted. Worker 19 may proceed to S7 focused/full regression and final delivery reporting.
+S7 must not add new feature scope, modify `frontend/`, activate the production Web Profile, or mark
+T-0143 `done`; final task status remains a Manager decision.
+
+## S5 Final Re-review Acceptance And S6 Entry Gate
+
+Manager final S5 re-review on 2026-08-06 found no remaining defect in the requested cancellation-order
+repair:
+
+- `ChatStreamHandle.request_cancel()` now performs only the first-wins atomic intent write and never
+  touches the Provider transport;
+- both response-finally paths establish the classified intent before aborting the bridge, then run
+  potentially blocking transport cancellation and handle close off the event loop;
+- the actual-handle capacity-one test blocks the producer in a pending bridge put and proves that
+  token, transport, durable persistence, and Trace all retain `client_disconnected`, with no assistant
+  message and complete admission/LLM-gate/registry release.
+
+Independent Manager verification:
+
+- the new test's five internal race iterations passed in three consecutive external rounds;
+- expanded S1-S5/API/Auth/runtime/store suite: 192 passed;
+- full suite: 799 passed, 1 existing skip;
+- `python -m ruff check app tests`, `python -m compileall -q app tests`, and `git diff --check`:
+  passed.
+
+S5 is accepted. Worker 19 may proceed to S6 only; S7 remains blocked and T-0143 remains
+`in_progress`.
+
+### S6 mandatory error-boundary input: ASGI send disconnect still escapes
+
+During final review, a direct ASGI 2.4 fault probe made `send()` raise `OSError` after response start.
+The complete app call propagated `OSError`; a direct `OwnedStreamingResponse` probe propagated
+Starlette `ClientDisconnect` and classified the close as `sse_generator_closed`. This is exactly
+within the frozen S6 observability/error/Caddy targeted-test phase, so it does not reopen S5, but it
+is blocking for S6 acceptance.
+
+S6 must:
+
+- treat raw `OSError` and Starlette `ClientDisconnect` from post-header send as
+  `client_disconnected`;
+- preserve first-wins cancellation intent, abort the bridge, complete off-loop cleanup, and suppress
+  the post-header delivery exception so it cannot become a raw ASGI traceback or proxy 502;
+- add direct response-owner and full-app ASGI 2.4 fault tests asserting no escaped exception, durable
+  `client_disconnected` when completion has not won, no partial assistant, and zero
+  admission/gate/registry ownership;
+- retain the existing rule that a durable completion which wins first is not rewritten by delivery
+  failure.
+
+## S5 Re-review
+
+Manager re-review on 2026-08-06 confirms that both original High findings are substantially fixed:
+
+- `handle.start()` now runs through `asyncio.to_thread()`. A deterministic `Thread.start()` failure
+  keeps persistence work off the event loop and produces `turn.started -> turn.failed` with no
+  Provider call or assistant message;
+- bridge abort remains loop-safe, while blocking transport cancellation and `handle.close()` now run
+  together in a worker thread. `/health` remains responsive during an injected blocking cancel, and
+  admission, LLM-gate, and registry ownership all return to zero.
+
+One cancellation-order defect remains before S5 acceptance.
+
+### Medium: bridge backpressure can overwrite the real disconnect classification
+
+The response currently calls `bridge.abort_from_any_thread()` before the off-loop
+`handle.cancel(reason="client_disconnected")`. If the producer is blocked in
+`bridge.put_from_producer()` when the browser disconnects, abort cancels that pending put first.
+`AgentStreamService._accept_delta()` then classifies the bridge exception as
+`sse_generator_closed` and wins the first-write cancellation token. The later adapter cancellation
+cannot replace it, so the durable terminal reason and Trace status no longer describe the observed
+client disconnect.
+
+An independent actual-handle probe held the initial event in a capacity-one bridge, blocked the
+producer on its first delta, then applied the adapter's abort-before-cancel order. All five runs
+produced both token and durable terminal reason `sse_generator_closed`, not
+`client_disconnected`. The delivered blocking-cancel test covers a producer waiting in model read,
+so it does not exercise this queue-write interleaving.
+
+Repair requirements:
+
+- atomically establish the allowlisted cancellation intent before bridge abort can wake the
+  producer, without performing synchronous transport close on the event loop;
+- keep bridge abort prompt and execute the potentially blocking transport cancel/close work off the
+  event loop; a narrow two-phase handle operation is acceptable if needed;
+- add a deterministic pending-bridge-put disconnect test that asserts durable reason
+  `client_disconnected`, no assistant message, no Provider retry, and zero admission/gate/registry
+  ownership after cleanup.
+
+Independent Manager verification:
+
+- both repaired fault tests passed in five consecutive rounds;
+- expanded S1-S5/API/Auth/runtime/store suite: 192 passed;
+- full suite: 798 passed, 1 existing skip;
+- `python -m ruff check app tests` and `python -m compileall -q app tests`: passed;
+- the pending-bridge-put probe reproduced the remaining classification defect in five of five runs.
+
+S5 remains `Changes Requested`; S6-S7 stay blocked and T-0143 remains `in_progress` until this final
+ordering repair passes focused/full regression and Manager re-review.
+
+## S5 API/SSE Checkpoint Review
+
+Manager review on 2026-08-06 accepts the endpoint boundary, SSE frame format, bounded FIFO bridge,
+normal terminal ordering, Auth/CSRF/request-ID integration, shared sync/stream rate limiter, and the
+main disconnect cleanup direction. Two blocking event-loop and terminal-delivery defects must be
+repaired before S5 acceptance.
+
+### High: producer thread-start failure runs terminalization on the event loop and loses the terminal
+
+`OwnedStreamingResponse._iterate_sse()` calls `handle.start()` directly on the Uvicorn event-loop
+thread. When `Thread.start()` fails, the accepted S4 handle synchronously enters failed persistence
+terminalization. Its attempt to deliver `turn.failed` is then rejected by `AsyncStreamBridge`, because
+`put_from_producer()` correctly forbids producer puts from the event-loop thread. Cleanup enqueues only
+the private producer-closed sentinel, so the HTTP 200 response ends after `turn.started` without the
+required unique business terminal.
+
+This also violates the frozen rule that thread-start/submission failure must not run SQLite,
+Controller, or terminal cleanup on the event loop. An independent fault probe reproduced exactly one
+outbound frame (`turn.started`) and no `turn.failed` or `turn.completed`.
+
+Repair requirements:
+
+- perform `handle.start(sink=bridge)` through a non-event-loop path, or otherwise guarantee that its
+  complete failure terminalization runs outside the event loop;
+- a post-header thread-start failure must complete failed persistence and emit exactly
+  `turn.started -> turn.failed`, without an adapter-invented second terminal;
+- add a deterministic `Thread.start()` failure test that also asserts no Provider call, no assistant
+  message, failed durable state, responsive event loop, and zero admission/gate/registry ownership.
+
+### High: disconnect cleanup invokes synchronous upstream close on the event loop
+
+Both `OwnedStreamingResponse.__call__()` and `_iterate_sse()` call `handle.cancel(reason=...)`
+directly on the event-loop thread. `ChatStreamHandle.cancel()` delegates to the active model session,
+and the production DeepSeek session implements cancellation by synchronously closing the HTTPX
+response stack. A slow socket/transport close can therefore stall `/health` and every other request
+on the single Uvicorn worker. Offloading only the later `handle.close()` does not protect this path.
+
+An independent blocking-cancel probe delayed the event loop for about 251 ms, matching the injected
+cancel delay.
+
+Repair requirements:
+
+- abort/wake the async bridge immediately, but execute `handle.cancel(reason)` and `handle.close()` in
+  a non-event-loop cleanup path while preserving the classified cancellation reason;
+- retain idempotent ownership between generator-finally and response-finally paths;
+- add a barrier-based blocking-cancel test proving `/health` remains responsive and eventual cleanup
+  leaves zero LLM permits, dialogue admission entries, and active registry handles.
+
+Independent Manager verification:
+
+- expanded S1-S5/API/Auth/runtime/store suite: 191 passed;
+- full suite: 797 passed, 1 existing skip;
+- `python -m ruff check app tests`, `python -m compileall -q app tests`, and `git diff --check`:
+  passed;
+- two deterministic fault probes reproduced the defects above; the delivered S5 tests do not cover
+  either failure mode.
+
+S5 remains unaccepted and T-0143 remains `in_progress`. S6-S7 stay blocked until both repairs pass
+focused and full regression tests and Manager re-review accepts this checkpoint.
+
+## S4 Re-review Acceptance
+
+Manager re-review on 2026-08-05 found no remaining blocking or non-blocking defect in S4.
+
+Accepted repairs:
+
+- a handle remains service-owned until successful registry registration; registration failure now
+  terminalizes a reserved record, releases admission/gate ownership, and preserves
+  `turn_started -> turn_failed` Trace order;
+- the handle now uses one condition-protected `created -> starting/running -> closing -> closed`
+  state machine, so a closer cannot observe an unstarted producer and a close that wins from
+  `created` prevents every later `start()`;
+- completed and failed replay delivery errors or cancellation no longer enter new-turn failure
+  terminalization, synthesize a different domain terminal, mutate the durable record, or call the
+  Provider; they emit only a content-safe delivery-aborted App Log summary.
+
+Independent Manager verification:
+
+- the nine deterministic registry/start-close/replay fault cases passed;
+- expanded S1-S4/runtime/store suite: 144 passed;
+- full suite: 787 passed, 1 existing skip;
+- `python -m ruff check app tests`, `python -m compileall -q app tests`, and `git diff --check`:
+  passed.
+
+The S4 checkpoint is accepted. Worker 19 may implement S5 API/SSE adapter only, then must stop for
+the next Manager checkpoint. S6-S7 remain blocked, and T-0143 remains `in_progress` until final
+delivery acceptance.
+
+## S4 Runtime Checkpoint Review
+
+Manager review on 2026-08-05 accepts the S4 module direction, frozen fingerprint implementation,
+shared turn-engine reuse, S2 persistence integration, bounded response accumulation, provider-neutral
+terminal mapping, post-commit Memory boundary, summary-only observability, and runtime resource
+registration order. Three blocking race/terminal issues must be repaired before S4 acceptance.
+
+### High: registry-close race leaks a reserved turn and dialogue admission
+
+`AgentStreamService.stream_chat()` assigns the new handle before calling
+`ActiveStreamRegistry.register()`, but its exception cleanup closes only the admission when no handle
+was constructed. If the registry enters `closing` between the initial `is_open` check and
+`register()`, registration raises after reserve and leaves both the durable row `in_progress` and the
+Session/dialogue admission held.
+
+Repair requirements:
+
+- every failure after a reserved handle is constructed must terminalize/close that handle even when
+  registration itself failed;
+- order the pre-return ownership steps so runtime close cannot produce `turn_failed` before a later
+  `turn_started` trace;
+- add a barrier-based registry-close/register race test asserting no model call, a non-live terminal
+  persistence state, zero admission entries, zero gate permits, and zero registry handles.
+
+### High: `start()` and `close()` do not form one atomic handle state machine
+
+`start()` publishes `running` and the `Thread` object before calling `Thread.start()`. A concurrent
+`close()` can therefore call `join()` on an unstarted thread and raise `RuntimeError`. Separately,
+`close()` observes `created` without first transitioning it to a closing state; while failed
+terminal persistence is blocked, another thread can still successfully call `start()`. The observed
+result was a terminal event written to a sink after that sink had already been closed.
+
+Repair requirements:
+
+- introduce an explicit atomic starting/closing transition, or start the producer while the handle
+  condition still prevents a closer from observing an unstarted producer;
+- a closer that wins from `created` must make all later `start()` calls fail before it performs
+  persistence or other external work;
+- add deterministic barrier tests for both `running-before-Thread.start()` and
+  `created-close-before-start` interleavings, including terminal ordering and resource release.
+
+### High: completed replay can be converted into a new failed domain terminal
+
+Completed replay sends stored assistant deltas through the generic producer exception path. A
+single replay sink timeout is mapped to `MODEL_TIMEOUT` and emits `turn.failed`, even though the
+immutable durable outcome is completed. Cancellation or delivery failure during replay can create
+the same mismatch. This violates the frozen `completed -> replay completed` idempotency contract.
+
+Repair requirements:
+
+- completed/failed replay terminal identity must always derive from the immutable durable record;
+- replay delivery failure or cancellation may prevent network delivery and may produce a safe App
+  Log delivery status, but must not synthesize a different business terminal;
+- add completed-replay slow-consumer/disconnect/cancel tests and failed-replay equivalents, proving
+  the Provider is not called and the durable/domain terminal identity is not rewritten.
+
+Independent Manager verification:
+
+- focused S1-S4/runtime/store suite: 135 passed;
+- full suite: 778 passed, 1 existing skip;
+- `python -m ruff check app tests`, `python -m compileall -q app tests`, and `git diff --check`:
+  passed;
+- three deterministic fault probes reproduced the defects above. Existing tests do not cover those
+  interleavings.
+
+S4 remains unaccepted and T-0143 remains `in_progress`. S5-S7 are blocked until the worker repairs
+these findings and Manager re-review accepts the S4 checkpoint.
 
 ## S2 Re-review Acceptance
 

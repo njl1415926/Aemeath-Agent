@@ -42,6 +42,13 @@ class TurnPreflight:
     active_character_id: str
     warnings: list[str]
     run: ConversationRun = field(repr=False)
+    streaming_safe_observability: bool = False
+
+
+@dataclass(frozen=True)
+class CharacterResolution:
+    active_character_id: str
+    warnings: tuple[str, ...]
 
 
 @dataclass
@@ -104,18 +111,15 @@ class DialogueTurnEngine:
         *,
         turn_input: AgentTurnInput,
         turn_id: str,
+        record_started: bool = True,
+        streaming_safe_observability: bool = False,
+        character_resolution: CharacterResolution | None = None,
     ) -> TurnPreflight:
-        warnings: list[str] = []
-        try:
-            character_profile = self.character_provider.load_profile(
-                character_id=turn_input.character_id,
-            )
-        except KeyError:
-            character_profile = self.character_provider.load_profile(
-                character_id=self.settings.default_character_id,
-            )
-            warnings.append("character_id_unknown_using_default_profile")
-        active_character_id = character_profile.character_id
+        resolution = character_resolution or self.resolve_character(
+            requested_character_id=turn_input.character_id
+        )
+        warnings = list(resolution.warnings)
+        active_character_id = resolution.active_character_id
         try:
             self.session_store.ensure_session(
                 session_id=turn_input.session_id,
@@ -141,23 +145,47 @@ class DialogueTurnEngine:
         )
         if turn_input.character_id != active_character_id:
             warnings.append("character_id_mismatch_using_loaded_profile")
-        self._record_trace(
-            event_type="turn_started",
-            turn_id=turn_id,
-            turn_input=turn_input,
-            payload={
-                "metadata": turn_input.metadata,
-                "requested_character_id": turn_input.character_id,
-                "active_character_id": active_character_id,
-            },
-            character_id=active_character_id,
-        )
-        return TurnPreflight(
+        preflight = TurnPreflight(
             turn_id=turn_id,
             turn_input=turn_input,
             active_character_id=active_character_id,
             warnings=warnings,
             run=run,
+            streaming_safe_observability=streaming_safe_observability,
+        )
+        if record_started:
+            self.record_started(preflight=preflight)
+        return preflight
+
+    def resolve_character(self, *, requested_character_id: str) -> CharacterResolution:
+        warnings: list[str] = []
+        try:
+            character_profile = self.character_provider.load_profile(
+                character_id=requested_character_id,
+            )
+        except KeyError:
+            character_profile = self.character_provider.load_profile(
+                character_id=self.settings.default_character_id,
+            )
+            warnings.append("character_id_unknown_using_default_profile")
+        return CharacterResolution(
+            active_character_id=character_profile.character_id,
+            warnings=tuple(warnings),
+        )
+
+    def record_started(self, *, preflight: TurnPreflight) -> None:
+        payload: dict[str, Any] = {
+            "requested_character_id": preflight.turn_input.character_id,
+            "active_character_id": preflight.active_character_id,
+        }
+        if not preflight.streaming_safe_observability:
+            payload["metadata"] = preflight.turn_input.metadata
+        self._record_trace(
+            event_type="turn_started",
+            turn_id=preflight.turn_id,
+            turn_input=preflight.turn_input,
+            payload=payload,
+            character_id=preflight.active_character_id,
         )
 
     def prepare(
@@ -279,21 +307,27 @@ class DialogueTurnEngine:
                 ),
                 character_id=active_character_id,
             )
+        prompt_trace_payload: dict[str, Any] = {
+            "sections": [
+                {
+                    "id": section.id,
+                    "source_ids": section.source_ids,
+                    "line_count": len(section.content_lines),
+                }
+                for section in prompt_context.sections
+            ],
+        }
+        if preflight.streaming_safe_observability:
+            prompt_trace_payload["metadata"] = self._stream_prompt_metadata_summary(
+                prompt_context.metadata
+            )
+        else:
+            prompt_trace_payload["metadata"] = prompt_context.metadata
         self._record_trace(
             event_type="prompt_context_built",
             turn_id=turn_id,
             turn_input=turn_input,
-            payload={
-                "sections": [
-                    {
-                        "id": section.id,
-                        "source_ids": section.source_ids,
-                        "line_count": len(section.content_lines),
-                    }
-                    for section in prompt_context.sections
-                ],
-                "metadata": prompt_context.metadata,
-            },
+            payload=prompt_trace_payload,
             character_id=active_character_id,
         )
         prompt_messages = self.prompt_compiler.compile_messages(context=prompt_context)
@@ -345,6 +379,109 @@ class DialogueTurnEngine:
             payload={"response_length": len(response)},
             character_id=preflight.active_character_id,
         )
+
+    def record_response_stream_started(self, *, preflight: TurnPreflight) -> None:
+        self._record_trace(
+            event_type="response_stream_started",
+            turn_id=preflight.turn_id,
+            turn_input=preflight.turn_input,
+            payload={"status": "started"},
+            character_id=preflight.active_character_id,
+        )
+
+    def record_stream_completed(
+        self,
+        *,
+        prepared: PreparedDialogueTurn,
+        warnings: tuple[str, ...],
+        delta_count: int,
+        response_char_count: int,
+        response_utf8_bytes: int,
+    ) -> None:
+        preflight = prepared.preflight
+        preflight.run.ended_at = utc_now()
+        preflight.run.status = "completed"
+        preflight.run.warnings = list(warnings)
+        summary = {
+            "status": "completed",
+            "delta_count": delta_count,
+            "response_char_count": response_char_count,
+            "response_utf8_bytes": response_utf8_bytes,
+        }
+        try:
+            self._record_trace(
+                event_type="response_stream_completed",
+                turn_id=preflight.turn_id,
+                turn_input=preflight.turn_input,
+                payload=summary,
+                character_id=preflight.active_character_id,
+            )
+            self._record_trace(
+                event_type="turn_completed",
+                turn_id=preflight.turn_id,
+                turn_input=preflight.turn_input,
+                payload={**summary, "warnings": list(warnings)},
+                character_id=preflight.active_character_id,
+            )
+        except Exception:
+            pass
+        self._record_stream_prompt_summary_best_effort(
+            prepared=prepared,
+            status="completed",
+            summary=summary,
+            warnings=warnings,
+        )
+
+    def record_stream_failed(
+        self,
+        *,
+        preflight: TurnPreflight,
+        prepared: PreparedDialogueTurn | None,
+        error: Exception,
+        terminal_status: str,
+        delta_count: int,
+        response_char_count: int,
+        response_utf8_bytes: int,
+    ) -> None:
+        error_info = map_exception(error)
+        preflight.run.ended_at = utc_now()
+        preflight.run.status = "failed"
+        summary = {
+            "status": terminal_status,
+            "delta_count": delta_count,
+            "response_char_count": response_char_count,
+            "response_utf8_bytes": response_utf8_bytes,
+            "error_code": error_info.code.value,
+        }
+        try:
+            self._record_trace(
+                event_type="response_stream_failed",
+                turn_id=preflight.turn_id,
+                turn_input=preflight.turn_input,
+                payload=summary,
+                level="error",
+                character_id=preflight.active_character_id,
+            )
+            self._record_trace(
+                event_type="turn_failed",
+                turn_id=preflight.turn_id,
+                turn_input=preflight.turn_input,
+                payload=summary,
+                level="error",
+                character_id=preflight.active_character_id,
+            )
+        except Exception:
+            pass
+        if prepared is not None:
+            self._record_stream_prompt_summary_best_effort(
+                prepared=prepared,
+                status="failed",
+                summary=summary,
+                warnings=tuple(preflight.warnings),
+                error_code=error_info.code.value,
+                error_type=error_info.error_type,
+                error_public_message=error_info.public_message,
+            )
 
     def decide_state_update(
         self,
@@ -605,3 +742,79 @@ class DialogueTurnEngine:
                 error=error,
             )
         )
+
+    def _record_stream_prompt_summary_best_effort(
+        self,
+        *,
+        prepared: PreparedDialogueTurn,
+        status: str,
+        summary: dict[str, Any],
+        warnings: tuple[str, ...],
+        error_code: str | None = None,
+        error_type: str | None = None,
+        error_public_message: str | None = None,
+    ) -> None:
+        preflight = prepared.preflight
+        section_summary = [
+            {
+                "id": section.get("id"),
+                "line_count": len(section.get("content_lines", ())),
+                "source_count": len(section.get("source_ids", ())),
+            }
+            for section in prepared.prompt_sections
+        ]
+        metadata = {
+            "streaming_summary": dict(summary),
+            "prompt_sections": section_summary,
+            **self._stream_prompt_metadata_summary(prepared.prompt_context_metadata),
+        }
+        try:
+            self.prompt_run_logger.record(
+                PromptRunRecord(
+                    run_id=new_id("prompt_run"),
+                    turn_id=preflight.turn_id,
+                    session_id=preflight.turn_input.session_id,
+                    user_id=preflight.turn_input.user_id,
+                    character_id=preflight.active_character_id,
+                    model=self.settings.aemeath_model,
+                    messages=[],
+                    prompt_context_metadata=metadata,
+                    sections=[],
+                    response=None,
+                    warnings=list(warnings),
+                    status="completed" if status == "completed" else "failed",
+                    error_code=error_code,
+                    error_type=error_type,
+                    error_public_message=error_public_message,
+                    error=None,
+                )
+            )
+        except Exception:
+            return
+
+    def _stream_prompt_metadata_summary(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        if not self.settings.enable_context_budget:
+            return {}
+        budget = metadata.get("context_budget")
+        if not isinstance(budget, dict):
+            return {}
+        safe_budget: dict[str, Any] = {}
+        allowed_numeric = {
+            "max_chars",
+            "estimated_before",
+            "estimated_after",
+            "over_budget_chars",
+            "dropped_line_count",
+        }
+        for key in allowed_numeric:
+            value = budget.get(key)
+            if isinstance(value, bool) or (
+                isinstance(value, int) and not isinstance(value, bool)
+            ):
+                safe_budget[key] = value
+        status = budget.get("status")
+        if status in {"disabled", "protected_floor_exceeded", "trimmed", "within_budget"}:
+            safe_budget["status"] = status
+        if isinstance(budget.get("budget_enabled"), bool):
+            safe_budget["budget_enabled"] = budget["budget_enabled"]
+        return {"context_budget": safe_budget}

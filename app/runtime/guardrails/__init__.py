@@ -3,6 +3,7 @@ from app.runtime.guardrails.concurrency import (
     ConcurrencyGate,
     LimitedChatModelClient,
     LimitedEmbeddingProvider,
+    LimitedStreamingChatModelClient,
 )
 from app.runtime.guardrails.errors import ApiRateLimitedError, RuntimeBusyError
 from app.runtime.guardrails.input_limits import ChatInputLimitPolicyV01
@@ -16,5 +17,6 @@ __all__ = [
     "InProcessDialogueAdmission",
     "LimitedChatModelClient",
     "LimitedEmbeddingProvider",
+    "LimitedStreamingChatModelClient",
     "RuntimeBusyError",
 ]

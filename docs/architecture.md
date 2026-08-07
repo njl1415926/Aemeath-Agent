@@ -35,8 +35,9 @@ app-log behavior at the HTTP adapter boundary.
 ## 2026-08-04 Invitation-only Web MVP Target
 
 The Manager-frozen Web target is documented in `docs/web_mvp_contract.md`. Browser Auth and
-invitation runtime support is implemented under T-0142; streaming, Session API completion, the
-frontend, and production Web-profile activation remain gated work:
+invitation runtime support is implemented under T-0142, and the streaming runtime/API is implemented
+under T-0143. Session API completion, the frontend, and production Web-profile activation remain
+gated work:
 
 ```text
 Browser
@@ -57,13 +58,41 @@ from dialogue Sessions and do not own conversation lifecycle or history.
 
 Streaming is a Service/API capability with domain events. HTTP, SSE, Cookie, and CSRF types remain
 outside `DialogueController`, Character, Memory, RAG, Prompt, State, and model provider ports. The
-synchronous `AgentService` path remains compatible while the Web frontend uses the future streaming
-path. Caddy serves static assets and API from one HTTPS origin, so production CORS remains empty and
-the final image does not run Node.js.
+synchronous `AgentService` path remains compatible while the future Web frontend can use the
+implemented streaming path. Caddy serves static assets and API from one HTTPS origin, so production
+CORS remains empty and the final image does not run Node.js.
 
-Implementation is split into T-0142 through T-0146. T-0142 is accepted; D6 backup may now proceed
-against the frozen Auth schema. D7 must observe final Web events, and D8 remains the real-cloud
-acceptance gate.
+Implementation is split into T-0142 through T-0146. T-0142 and T-0143 are accepted; D6 backup may
+proceed against the frozen Auth and streaming persistence schemas. T-0144 through T-0146 remain the
+Session API, frontend, security/quota, and browser E2E work. D7 must observe final Web events, and D8
+remains the real-cloud acceptance gate.
+
+## 2026-08-06 Streaming Chat Runtime And API v0.1
+
+Streaming is an application-service capability, not a second Controller implementation:
+
+```text
+POST /v1/chat/stream
+  -> Browser Cookie or dev Bearer Auth + CSRF/provenance + shared rate limit
+  -> AgentStreamService
+  -> request fingerprint + per-key registry + StreamTurnPersistencePort
+  -> shared DialogueTurnEngine preflight/prepare
+  -> global LLM gate -> StreamingChatModelClient -> ModelStreamSession
+  -> bounded AsyncStreamBridge -> SSE adapter
+  -> atomic complete/fail persistence -> resource cleanup
+```
+
+`DialogueController` and `/v1/chat` remain synchronous facades over the same `DialogueTurnEngine`.
+The streaming path requires a bounded `client_message_id`, persists the user request exactly once,
+and exposes only `turn.started`, `response.delta`, and one `turn.completed` or `turn.failed` terminal.
+`ChatStreamHandle` owns start, first-wins cancellation intent, transport cancellation, and idempotent
+close. HTTP/SSE framing, heartbeat, Cookie/CSRF details, and downstream disconnect handling remain in
+`app/api`; they do not enter Character, Memory, RAG, Prompt, State, Controller, or model-domain ports.
+
+The active registry, admission locks, rate limits, and LLM gate are process-local, so production
+streaming remains restricted to one Uvicorn worker. Streaming Prompt Logs are summary-only and
+content-safe. Production Web-profile activation and real-browser/cloud acceptance remain gated by
+T-0144 through T-0146 and deployment D6-D8.
 
 ## 2026-07-26 Embedding Foundation And Artifact Persistence
 
@@ -197,7 +226,7 @@ Session is promoted from a transient string to a first-class runtime object. The
 is a globally unique `session_id`; `user_id` and `character_id` define ownership and filtering.
 A v0.1 session belongs to exactly one user and one character.
 
-The planned runtime boundary is:
+The current stable runtime boundary is:
 
 ```text
 CLI / API
@@ -522,8 +551,8 @@ Boundary:
 - `DialogueController` still only orchestrates. It records structured failure metadata and
   re-raises the original exception.
 - CLI and FastAPI/service adapters decide how to present mapped public errors.
-- Future service and FastAPI layers should use `map_exception()` and `ErrorInfo.to_public_dict()`;
-  they should not return raw `str(exc)` to users.
+- Current and future service/FastAPI adapters use `map_exception()` and
+  `ErrorInfo.to_public_dict()`; they must not return raw `str(exc)` to users.
 
 ### Audio / TTS Experimental Workspace
 

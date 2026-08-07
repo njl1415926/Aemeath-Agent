@@ -69,6 +69,12 @@ Current v0.1 persistence:
 
 Prompt logs are separate from trace logs. Do not merge prompt-run records into trace logs.
 
+Streaming turns use a stricter Prompt Log contract even when API prompt logging is enabled. They
+write only bounded status/count/context-budget summaries with `messages=[]`, `sections=[]`,
+`response=None`, and `error=None`. User input, compiled prompt, deltas, accumulated response,
+Memory/Evidence/Character content, vectors, Provider chunks/bodies, reasoning, credentials, and raw
+exception bodies are never written by the streaming path.
+
 ## Configuration
 
 ```env
@@ -128,3 +134,8 @@ stable API errors.
 The app logger contract exists for process and boundary logs, but v0.1 does not inject app logging
 into `DialogueController`. Future CLI, service, API, and worker operation work can use
 `AppLoggerPort` at those boundaries.
+
+`AgentStreamService` and the SSE adapter use `AppLoggerPort` for identifier/status/count summaries.
+Post-header disconnects are recorded as `client_disconnected` without exception text. Trace terminal
+status and durable terminal reason use the same first-wins cancellation classification; response
+delta text is never copied into App Log or Trace Log.

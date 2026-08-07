@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from threading import Lock
+from threading import Condition, Lock, get_ident
 from time import monotonic
 from typing import Iterator
 
-from app.runtime.guardrails.concurrency import ConcurrencyGate
+from app.runtime.guardrails.concurrency import ConcurrencyGate, ConcurrencyPermitHandle
 from app.runtime.guardrails.errors import RuntimeBusyError
 from app.runtime.guardrails.schemas import DialogueAdmissionLease, DialogueAdmissionRequest
 
@@ -41,6 +41,17 @@ class InProcessDialogueAdmission:
     def acquire(
         self, *, request: DialogueAdmissionRequest
     ) -> Iterator[DialogueAdmissionLease]:
+        handle = self.open_handle(request=request)
+        try:
+            yield handle.lease
+        finally:
+            handle.close()
+
+    def open_handle(
+        self,
+        *,
+        request: DialogueAdmissionRequest,
+    ) -> InProcessDialogueAdmissionHandle:
         if not request.user_id or not request.session_id:
             raise ValueError("admission user_id and session_id are required")
         key = (request.user_id, request.session_id)
@@ -52,14 +63,21 @@ class InProcessDialogueAdmission:
             self._dereference_entry(key, entry)
             raise RuntimeBusyError("session_lock_wait_timeout")
         try:
-            with self._dialogue_gate.acquire() as dialogue_wait_ms:
-                yield DialogueAdmissionLease(
-                    session_wait_ms=session_wait_ms,
-                    dialogue_wait_ms=dialogue_wait_ms,
-                )
-        finally:
+            permit = self._dialogue_gate.open_handle()
+        except BaseException:
             entry.lock.release()
             self._dereference_entry(key, entry)
+            raise
+        return InProcessDialogueAdmissionHandle(
+            owner=self,
+            key=key,
+            entry=entry,
+            permit=permit,
+            lease=DialogueAdmissionLease(
+                session_wait_ms=session_wait_ms,
+                dialogue_wait_ms=permit.wait_ms,
+            ),
+        )
 
     def _reference_entry(self, key: tuple[str, str]) -> _SessionEntry:
         now = monotonic()
@@ -83,3 +101,68 @@ class InProcessDialogueAdmission:
     def entry_count(self) -> int:
         with self._registry_lock:
             return len(self._entries)
+
+
+class InProcessDialogueAdmissionHandle:
+    """Owns one Session lock and dialogue permit across thread boundaries."""
+
+    def __init__(
+        self,
+        *,
+        owner: InProcessDialogueAdmission,
+        key: tuple[str, str],
+        entry: _SessionEntry,
+        permit: ConcurrencyPermitHandle,
+        lease: DialogueAdmissionLease,
+    ) -> None:
+        self._owner = owner
+        self._key = key
+        self._entry = entry
+        self._permit = permit
+        self._lease = lease
+        self._condition = Condition(Lock())
+        self._state = "open"
+        self._closing_thread_id: int | None = None
+
+    @property
+    def lease(self) -> DialogueAdmissionLease:
+        return self._lease
+
+    def close(self) -> None:
+        current_thread_id = get_ident()
+        with self._condition:
+            if self._state == "closed":
+                return
+            if self._state == "closing":
+                if self._closing_thread_id == current_thread_id:
+                    return
+                deadline = monotonic() + 5.0
+                while self._state != "closed":
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        return
+                    self._condition.wait(timeout=remaining)
+                return
+            self._state = "closing"
+            self._closing_thread_id = current_thread_id
+
+        first_error: BaseException | None = None
+        try:
+            self._permit.close()
+        except BaseException as exc:
+            first_error = exc
+        try:
+            self._entry.lock.release()
+        except BaseException as exc:
+            first_error = first_error or exc
+        try:
+            self._owner._dereference_entry(self._key, self._entry)
+        except BaseException as exc:
+            first_error = first_error or exc
+        finally:
+            with self._condition:
+                self._state = "closed"
+                self._closing_thread_id = None
+                self._condition.notify_all()
+        if first_error is not None:
+            raise first_error

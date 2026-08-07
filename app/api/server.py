@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import ApiRuntime, build_api_runtime
 from app.api.errors import error_response, register_exception_handlers, validation_error_info
-from app.api.routes import auth, chat, health, sessions
+from app.api.routes import auth, chat, chat_stream, health, sessions
+from app.api.sse import SSEClientDisconnectMiddleware
 from app.api.web_security import enforce_web_request_provenance
 from app.config import Settings
 from app.db.readiness import build_database_readiness
@@ -56,8 +57,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 def _create_app_with_runtime(application_runtime: ApplicationRuntime) -> FastAPI:
     resolved_settings = application_runtime.settings
+    agent_stream_service = application_runtime.agent_stream_service
+    if agent_stream_service is None:
+        raise RuntimeError("api_stream_service_missing")
     runtime = build_api_runtime(
         agent_service=application_runtime.agent_service,
+        agent_stream_service=agent_stream_service,
         settings=resolved_settings,
         store=application_runtime.store,
         rate_limiter=InProcessApiRateLimiter(
@@ -148,10 +153,13 @@ def _create_app_with_runtime(application_runtime: ApplicationRuntime) -> FastAPI
         )
         return response
 
+    app.add_middleware(SSEClientDisconnectMiddleware)
+
     register_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(chat.router)
+    app.include_router(chat_stream.router)
     app.include_router(sessions.router)
     return app
 

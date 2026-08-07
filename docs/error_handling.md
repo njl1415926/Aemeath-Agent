@@ -18,6 +18,19 @@ Final validation:
 - `ruff check .`: All checks passed
 - `python -m compileall -q app`: passed
 
+## 2026-08 Streaming Chat Addendum
+
+Streaming chat adds stable `CHAT_REQUEST_IN_PROGRESS`, `CHAT_REQUEST_CONFLICT`,
+`CHAT_STREAM_CANCELLED`, and `CHAT_STREAM_INTERRUPTED` codes. Cancelled and interrupted terminals
+are non-retryable in v0.1. Provider-specific finish reasons and raw response/exception bodies are
+never persistence reasons or public errors.
+
+Before `text/event-stream` headers, errors use the normal HTTP JSON envelope and status mapping.
+After headers, business failures terminate through exactly one safe `turn.failed` event. A raw ASGI
+`OSError` or Starlette `ClientDisconnect` from downstream send is classified as
+`client_disconnected`, suppressed after complete off-loop cleanup, and must not rewrite a durable
+completion that already won its persistence CAS.
+
 本文档记录 v0.3 之后 `app/errors/` 的第一阶段错误契约。目标是在接入
 FastAPI、Web UI、更多 worker 或外部工具之前，先建立一套 CLI、API、Trace、
 Prompt Log 都能复用的稳定错误体系。

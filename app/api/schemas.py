@@ -36,6 +36,14 @@ class ChatRequestBody(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class StreamChatRequestBody(BaseModel):
+    session_id: str = Field(min_length=1)
+    character_id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    client_message_id: str = Field(min_length=1, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class UsedMemoryResponse(BaseModel):
     id: str
     content: str

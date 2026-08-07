@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from threading import Event, Thread
 
 import pytest
 
-from app.runtime.guardrails.concurrency import ConcurrencyGate
+from app.model.streaming import ModelStreamFinished, ModelStreamRequest
+from app.runtime.guardrails.concurrency import (
+    ConcurrencyGate,
+    LimitedChatModelClient,
+    LimitedStreamingChatModelClient,
+)
 from app.runtime.guardrails.errors import RuntimeBusyError
 
 
@@ -47,3 +53,69 @@ def test_gate_peak_count_tracks_real_parallel_holders():
     release.set()
     for thread in threads:
         thread.join(timeout=1)
+
+
+def test_gate_explicit_permit_is_cross_thread_and_idempotent() -> None:
+    gate = ConcurrencyGate(limit=1, wait_timeout_seconds=0.01, reason="dialogue")
+    permit = gate.open_handle()
+    threads = [Thread(target=permit.close) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+    permit.close()
+
+    assert gate.counts() == (0, 1)
+    with gate.acquire():
+        assert gate.counts()[0] == 1
+
+
+def test_sync_and_streaming_clients_share_one_llm_gate() -> None:
+    gate = ConcurrencyGate(limit=1, wait_timeout_seconds=0.01, reason="llm_concurrency")
+    entered = Event()
+    release = Event()
+
+    class BlockingStream:
+        def __iter__(self):
+            entered.set()
+            release.wait(timeout=2)
+            yield ModelStreamFinished("complete")
+
+        def cancel(self, *, reason):
+            del reason
+            release.set()
+
+        def close(self):
+            release.set()
+
+    class StreamClient:
+        @contextmanager
+        def open_stream(self, *, request):
+            del request
+            stream = BlockingStream()
+            try:
+                yield stream
+            finally:
+                stream.close()
+
+    class SyncClient:
+        def chat(self, *, messages):
+            del messages
+            return "sync"
+
+    streaming = LimitedStreamingChatModelClient(gate=gate, delegate=StreamClient())
+    synchronous = LimitedChatModelClient(gate=gate, delegate=SyncClient())
+
+    def consume() -> None:
+        with streaming.open_stream(request=ModelStreamRequest(messages=[])) as stream:
+            list(stream)
+
+    thread = Thread(target=consume)
+    thread.start()
+    assert entered.wait(timeout=1)
+    with pytest.raises(RuntimeBusyError) as raised:
+        synchronous.chat(messages=[])
+    assert raised.value.reason == "llm_concurrency"
+    release.set()
+    thread.join(timeout=1)
+    assert gate.counts()[0] == 0

@@ -28,6 +28,7 @@ from app.runtime.guardrails.ports import ApiRateLimiterPort
 from app.runtime.guardrails.schemas import ApiRateLimitRequest
 from app.runtime.readiness import ReadinessPort
 from app.services.agent_service import AgentService
+from app.services.agent_stream_service import AgentStreamService
 from app.services.schemas import UserContext
 from app.services.session_service import SessionService
 
@@ -35,6 +36,7 @@ from app.services.session_service import SessionService
 @dataclass(frozen=True)
 class ApiRuntime:
     agent_service: AgentService
+    agent_stream_service: AgentStreamService
     session_service: SessionService
     auth_service: AuthService
     local_default_resolver: LocalDefaultAccountResolver
@@ -57,6 +59,7 @@ class BrowserAuthRuntime:
 def build_api_runtime(
     *,
     agent_service: AgentService,
+    agent_stream_service: AgentStreamService,
     settings: Settings,
     store: StoreFacade,
     rate_limiter: ApiRateLimiterPort,
@@ -109,6 +112,7 @@ def build_api_runtime(
         )
     return ApiRuntime(
         agent_service=agent_service,
+        agent_stream_service=agent_stream_service,
         session_service=SessionService(session_store=store, message_store=store),
         auth_service=AuthService(account_service),
         local_default_resolver=LocalDefaultAccountResolver(

@@ -28,6 +28,7 @@ from app.memory.runtime import build_memory_embedding_runtime
 from app.memory.writer import QueuedMemoryWriter
 from app.model.deepseek import DeepSeekClient, FallbackChatModelClient
 from app.model.mock import MockChatModelClient
+from app.model.mock_streaming import MockStreamingChatModelClient
 from app.observability.noop import NoopPromptRunLogger, NoopTraceLogger
 from app.observability.ports import AppLoggerPort
 from app.observability.prompt_run_logger import JsonlPromptRunLogger
@@ -40,15 +41,19 @@ from app.runtime.guardrails.concurrency import (
     ConcurrencyGate,
     LimitedChatModelClient,
     LimitedEmbeddingProvider,
+    LimitedStreamingChatModelClient,
 )
 from app.runtime.guardrails.input_limits import ChatInputLimitPolicyV01
 from app.runtime.resources import ApplicationRuntime, RuntimeResources
+from app.runtime.streaming import ActiveStreamRegistry
 from app.semantic.coordinator import SemanticQueryCoordinator
 from app.semantic.disabled import DisabledSemanticQueryCoordinator
 from app.semantic.eligibility import DeterministicSemanticEligibilityPolicyV01
 from app.semantic.query_builder import NeutralTurnQueryBuilderV01
 from app.services.agent_service import AgentService
+from app.services.agent_stream_service import AgentStreamService, StreamServiceLimits
 from app.state.classifier import StateUpdateClassifier
+from app.utils.ids import new_id
 
 
 def build_application_runtime(
@@ -68,12 +73,18 @@ def build_application_runtime(
     try:
         store = create_store(db_path=resolved.db_path, backend=resolved.db_backend)
         _bootstrap_accounts(settings=resolved, store=store)
+        owner_runtime_id = new_id("runtime")
+        if surface == "api":
+            store.fail_orphan_if_owned_by_other_runtime(
+                owner_runtime_id=owner_runtime_id,
+                limit=resolved.stream_orphan_recovery_limit,
+            )
         llm_gate = ConcurrencyGate(
             limit=resolved.runtime_llm_max_concurrency,
             wait_timeout_seconds=resolved.runtime_llm_wait_timeout_seconds,
             reason="llm_concurrency",
         )
-        dialogue_model, extraction_model = _build_models(
+        dialogue_model, extraction_model, streaming_model = _build_models(
             settings=resolved,
             surface=surface,
             gate=llm_gate,
@@ -184,20 +195,53 @@ def build_application_runtime(
             session_store=store,
             extraction_service=memory_extraction_service,
         )
+        admission = InProcessDialogueAdmission(
+            session_wait_timeout_seconds=resolved.runtime_session_wait_timeout_seconds,
+            dialogue_limit=resolved.runtime_dialogue_max_concurrency,
+            dialogue_wait_timeout_seconds=resolved.runtime_dialogue_wait_timeout_seconds,
+        )
+        input_limit_policy = ChatInputLimitPolicyV01(
+            message_max_chars=resolved.chat_message_max_chars,
+            message_max_utf8_bytes=resolved.chat_message_max_utf8_bytes,
+            metadata_max_utf8_bytes=resolved.chat_metadata_max_utf8_bytes,
+        )
         service = AgentService(
             controller=controller,
             app_logger=app_logger,
-            admission=InProcessDialogueAdmission(
-                session_wait_timeout_seconds=resolved.runtime_session_wait_timeout_seconds,
-                dialogue_limit=resolved.runtime_dialogue_max_concurrency,
-                dialogue_wait_timeout_seconds=resolved.runtime_dialogue_wait_timeout_seconds,
-            ),
-            input_limit_policy=ChatInputLimitPolicyV01(
-                message_max_chars=resolved.chat_message_max_chars,
-                message_max_utf8_bytes=resolved.chat_message_max_utf8_bytes,
-                metadata_max_utf8_bytes=resolved.chat_metadata_max_utf8_bytes,
-            ),
+            admission=admission,
+            input_limit_policy=input_limit_policy,
         )
+        active_stream_registry = None
+        agent_stream_service = None
+        if surface == "api":
+            active_stream_registry = ActiveStreamRegistry(app_logger=app_logger)
+            resources.register(
+                name="active_stream_registry",
+                close=active_stream_registry.close,
+            )
+            agent_stream_service = AgentStreamService(
+                turn_engine=controller.turn_engine,
+                model_client=streaming_model,
+                persistence=store,
+                admission=admission,
+                input_limit_policy=input_limit_policy,
+                active_stream_registry=active_stream_registry,
+                owner_runtime_id=owner_runtime_id,
+                limits=StreamServiceLimits(
+                    response_max_chars=resolved.stream_response_max_chars,
+                    response_max_utf8_bytes=resolved.stream_response_max_utf8_bytes,
+                    public_delta_max_utf8_bytes=(
+                        resolved.stream_public_delta_max_utf8_bytes
+                    ),
+                    producer_put_timeout_seconds=(
+                        resolved.stream_producer_put_timeout_seconds
+                    ),
+                    producer_join_timeout_seconds=(
+                        resolved.deepseek_read_timeout_seconds + 1.0
+                    ),
+                ),
+                app_logger=app_logger,
+            )
         return ApplicationRuntime(
             surface=surface,
             agent_service=service,
@@ -206,6 +250,8 @@ def build_application_runtime(
             settings=resolved,
             resources=resources,
             app_logger=app_logger,
+            agent_stream_service=agent_stream_service,
+            active_stream_registry=active_stream_registry,
         )
     except BaseException:
         resources.close()
@@ -232,6 +278,12 @@ def _build_models(
                 gate=gate,
                 delegate=MockMemoryExtractionModelClient(),
                 purpose="memory_extraction",
+                app_logger=app_logger,
+            ),
+            LimitedStreamingChatModelClient(
+                gate=gate,
+                delegate=MockStreamingChatModelClient(),
+                purpose="dialogue_stream",
                 app_logger=app_logger,
             ),
         )
@@ -271,6 +323,12 @@ def _build_models(
             gate=gate,
             delegate=deepseek,
             purpose="memory_extraction",
+            app_logger=app_logger,
+        ),
+        LimitedStreamingChatModelClient(
+            gate=gate,
+            delegate=deepseek,
+            purpose="dialogue_stream",
             app_logger=app_logger,
         ),
     )

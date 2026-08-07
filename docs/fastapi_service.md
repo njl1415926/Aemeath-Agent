@@ -6,7 +6,7 @@ FastAPI is an HTTP adapter around the existing application service boundary:
 HTTP routes
   -> AuthService / LocalDefaultAccountResolver
   -> UserContext
-  -> AgentService / SessionService
+  -> AgentStreamService / AgentService / SessionService
   -> existing controller and store ports
 ```
 
@@ -62,8 +62,10 @@ AEMEATH_API_ENABLE_PROMPT_RUN_LOG=false
 AEMEATH_API_ENABLE_MODEL_FALLBACK=false
 ```
 
-Prompt logs contain full prompt/messages/sections/response snapshots and should be treated as
-sensitive local debugging artifacts. Enable API prompt logs only for controlled debugging.
+Synchronous prompt logs contain full prompt/messages/sections/response snapshots and should be
+treated as sensitive local debugging artifacts. Streaming prompt logs are always summary-only:
+their messages and sections are empty and response/error bodies are omitted. Enable API prompt logs
+only for controlled debugging.
 
 `AEMEATH_DEV_AUTH_TOKEN` is treated as the configured dev-token source of truth in development.
 Production accepts only `AEMEATH_DEV_AUTH_TOKEN_FILE`; the corresponding DeepSeek contract is
@@ -78,7 +80,7 @@ Setting `AEMEATH_API_ENABLE_MODEL_FALLBACK=true` is rejected as `CONFIG_INVALID`
 
 ## Runtime limits
 
-`POST /v1/chat` is limited after authentication by an in-process user token bucket and an
+`POST /v1/chat` and `POST /v1/chat/stream` share one authenticated in-process user token bucket and an
 auxiliary client-IP bucket. The defaults are `12/minute, burst 4` per user and `60/minute, burst
 20` per IP. Rejections return `API_RATE_LIMITED` (HTTP 429) with integer `Retry-After`. CLI does
 not pass through this HTTP limiter.
@@ -101,6 +103,7 @@ and is never written to logs.
 GET  /health
 GET  /ready
 POST /v1/chat
+POST /v1/chat/stream
 GET  /v1/sessions
 POST /v1/sessions
 GET  /v1/sessions/{session_id}/messages
@@ -123,6 +126,14 @@ X-Request-ID`.
 `POST /v1/chat` calls `AgentService.handle_chat(...)`. It does not call `DialogueController`
 directly. If the supplied `session_id` does not exist, v0.1 follows the existing
 `SessionStorePort.ensure_session(...)` behavior and creates the session during the chat turn.
+
+`POST /v1/chat/stream` calls `AgentStreamService.stream_chat(...)` and requires a bounded
+`client_message_id`. A successful preflight returns UTF-8 `text/event-stream` in the order
+`turn.started -> response.delta* -> turn.completed | turn.failed`; 15-second heartbeat comments are
+HTTP-adapter framing rather than domain events. Pre-header failures use the normal JSON error
+envelope. Post-header failures use the single safe terminal event, and client disconnect triggers
+first-wins cancellation plus off-loop Provider/handle cleanup. Cookie Web Auth requires the existing
+CSRF/provenance checks; dev Bearer remains a separate non-hybrid mode.
 
 Session routes use a thin `SessionService`. Message listing verifies that the session belongs to
 the current user and character before reading messages.
@@ -160,9 +171,8 @@ messages, or raw provider responses. App Log, Trace Log, and Prompt Log remain s
 ## Deferred
 
 - Web UI
-- token-by-token streaming
-- `/v1/chat/stream`
-- username/password login
 - OAuth
-- refresh tokens or cookie sessions
+- refresh tokens
+- production Web Profile activation
+- SSE offset/`Last-Event-ID` resume
 - PostgreSQL / Alembic

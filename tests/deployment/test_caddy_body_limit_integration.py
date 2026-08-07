@@ -87,8 +87,19 @@ def test_caddy_rejects_content_length_and_chunked_bodies_over_128_kib(tmp_path: 
     if not caddy_binary:
         pytest.skip("set AEMEATH_TEST_CADDY_BINARY for the pinned Caddy integration test")
     backend_port = _free_port()
-    proxy_port = _free_port()
     backend = ThreadingHTTPServer(("127.0.0.1", backend_port), _BodySink)
+    proxy_port = _free_port()
+    test_caddyfile = tmp_path / "Caddyfile"
+    test_caddyfile.write_text(
+        (ROOT / "deploy" / "Caddyfile")
+        .read_text(encoding="utf-8")
+        .replace(
+            "{\n",
+            "{\n\tadmin 127.0.0.1:0\n\tskip_install_trust\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
     _BodySink.forwarded_for_values.clear()
     backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
     backend_thread.start()
@@ -102,13 +113,13 @@ def test_caddy_rejects_content_length_and_chunked_bodies_over_128_kib(tmp_path: 
         }
     )
     process = subprocess.Popen(
-        [caddy_binary, "run", "--config", str(ROOT / "deploy" / "Caddyfile")],
+        [caddy_binary, "run", "--config", str(test_caddyfile)],
         env=environment,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     try:
-        deadline = time.monotonic() + 8
+        deadline = time.monotonic() + 20
         while True:
             try:
                 with socket.create_connection(("127.0.0.1", proxy_port), timeout=0.2):
@@ -133,7 +144,7 @@ def test_caddy_rejects_content_length_and_chunked_bodies_over_128_kib(tmp_path: 
         assert _request(
             proxy_port, [b"x" * (RAW_BODY_LIMIT + 1)], chunked=True
         )[0] == 413
-        assert _BodySink.forwarded_for_values[0] == "127.0.0.1"
+        assert _BodySink.forwarded_for_values[0] in {"127.0.0.1", "::1"}
     finally:
         process.terminate()
         process.wait(timeout=5)

@@ -7,7 +7,10 @@ import pytest
 from app.errors import AemeathError, ErrorCode
 from app.main import build_application_runtime
 from app.model.deepseek import FallbackChatModelClient
-from app.runtime.guardrails.concurrency import LimitedChatModelClient
+from app.runtime.guardrails.concurrency import (
+    LimitedChatModelClient,
+    LimitedStreamingChatModelClient,
+)
 
 
 class _FakeDeepSeek:
@@ -64,7 +67,11 @@ def test_api_dialogue_and_extraction_both_use_direct_deepseek(settings, monkeypa
     runtime = build_application_runtime(_remote_settings(settings), surface="api")
     dialogue = runtime.agent_service.controller.response_generator.chat_model
     extraction = runtime.memory_admin_service.extraction_service.model_client
+    streaming = runtime.agent_stream_service.model_client
     assert dialogue.delegate is extraction.delegate is _FakeDeepSeek.instances[0]
+    assert isinstance(streaming, LimitedStreamingChatModelClient)
+    assert streaming.delegate is _FakeDeepSeek.instances[0]
+    assert dialogue.gate is extraction.gate is streaming.gate
     runtime.close()
 
 
@@ -80,3 +87,30 @@ def test_api_fallback_configuration_fails_before_client_creation(settings, monke
     assert raised.value.code == ErrorCode.CONFIG_INVALID
     assert raised.value.metadata["reason"] == "api_model_fallback_not_supported"
     assert _FakeDeepSeek.instances == []
+
+
+def test_api_runtime_closes_stream_registry_before_deepseek_transport(
+    settings,
+    monkeypatch,
+) -> None:
+    calls = []
+
+    class TrackingDeepSeek(_FakeDeepSeek):
+        def close(self):
+            calls.append("deepseek")
+            super().close()
+
+    class TrackingRegistry:
+        def __init__(self, **_kwargs):
+            pass
+
+        def close(self):
+            calls.append("registry")
+
+    monkeypatch.setattr("app.main.DeepSeekClient", TrackingDeepSeek)
+    monkeypatch.setattr("app.main.ActiveStreamRegistry", TrackingRegistry)
+    runtime = build_application_runtime(_remote_settings(settings), surface="api")
+
+    runtime.close()
+
+    assert calls.index("registry") < calls.index("deepseek")

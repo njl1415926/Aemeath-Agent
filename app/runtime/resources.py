@@ -9,7 +9,9 @@ if TYPE_CHECKING:
     from app.db.store_factory import StoreFacade
     from app.memory.admin import MemoryAdminService
     from app.observability.ports import AppLoggerPort
+    from app.runtime.streaming import ActiveStreamRegistry
     from app.services.agent_service import AgentService
+    from app.services.agent_stream_service import AgentStreamService
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,8 @@ class ApplicationRuntime:
     settings: Settings
     resources: RuntimeResources
     app_logger: AppLoggerPort
+    agent_stream_service: AgentStreamService | None = None
+    active_stream_registry: ActiveStreamRegistry | None = None
 
     def close(self) -> tuple[ResourceCloseFailure, ...]:
         failures = self.resources.close()

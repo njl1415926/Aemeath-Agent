@@ -2,7 +2,7 @@
 
 Date: 2026-08-04
 
-Status: **Manager contract frozen; implementation remains task-gated**
+Status: **Manager contract frozen; T-0142 and T-0143 implemented; remaining work task-gated**
 
 Owner: Manager Session
 
@@ -53,7 +53,7 @@ Browser
        -> /v1/*, /health, /ready reverse proxy
   -> FastAPI HTTP adapter
        -> Browser Auth adapter -> UserContext
-       -> AgentService / future AgentStreamService
+       -> AgentService / AgentStreamService
        -> SessionService
   -> existing Controller and domain ports
 ```
@@ -210,16 +210,16 @@ GET  /v1/sessions
 POST /v1/sessions
 GET  /v1/sessions/{session_id}/messages
 POST /v1/chat
+POST /v1/chat/stream
 ```
 
-Web MVP adds:
+T-0144 adds the remaining Session lifecycle endpoints:
 
 ```text
 PATCH /v1/sessions/{session_id}
 POST  /v1/sessions/{session_id}/end
 POST  /v1/sessions/{session_id}/resume
 POST  /v1/sessions/{session_id}/archive
-POST  /v1/chat/stream
 ```
 
 Message and Session listing use opaque cursor pagination with bounded limits. Offset pagination is
@@ -364,18 +364,25 @@ class AgentStreamServicePort(Protocol):
         *,
         user_context: UserContext,
         request: StreamChatRequest,
-    ) -> Iterable[ChatStreamEvent]: ...
+    ) -> ChatStreamHandle: ...
+
+
+class ChatStreamHandle(Protocol):
+    def start(self, *, sink: StreamEventSink) -> None: ...
+    def request_cancel(self, *, reason: str) -> bool: ...
+    def cancel(self, *, reason: str) -> None: ...
+    def close(self) -> None: ...
 ```
 
-These signatures freeze responsibility, not final field-level implementation. Each Worker must submit
-its DTO/error/storage design before code changes.
+These signatures reflect the implemented v0.1 responsibility boundary. HTTP/SSE framing remains in
+`app/api`, while the service and handle remain provider-neutral.
 
 ## 12. Implementation Sequence
 
-1. **T-0142 Browser Auth And Invitations v0.1**
+1. **T-0142 Browser Auth And Invitations v0.1 - accepted**
    Freeze schemas/ports/errors, then implement invitation, credentials, Web Sessions, CSRF, admin CLI,
    raw/SQLAlchemy parity, and auth API.
-2. **T-0143 Streaming Chat Runtime And API v0.1**
+2. **T-0143 Streaming Chat Runtime And API v0.1 - accepted**
    Freeze domain events and Controller integration, then implement true DeepSeek-to-browser streaming,
    cancellation, idempotency, persistence, and safe observability.
 3. **T-0144 Web Session API Completion v0.1**

@@ -2,7 +2,7 @@
 
 ## 2026-06-08 Manager Update: Session Contract v0.1
 
-The planned public session type is `SessionRecord`:
+The stable public session type is `SessionRecord`:
 
 ```python
 @dataclass(frozen=True)
@@ -89,9 +89,10 @@ Boundary:
 - `app/services/schemas.py`
 - `app/services/agent_service.py`
 
-`AgentService` is the stable application boundary for CLI, FastAPI, future Web, streaming,
-and optional post-response adapters. It wraps the internal turn contract without moving
-Character, Memory, RAG, Prompt, Model, State, or Session policy out of their modules.
+`AgentService` is the stable synchronous application boundary for CLI, FastAPI, and optional
+post-response adapters. `AgentStreamServicePort` is the corresponding streaming boundary. Both use
+the shared `DialogueTurnEngine` without moving Character, Memory, RAG, Prompt, Model, State, or
+Session policy out of their modules.
 
 ### UserContext
 
@@ -279,7 +280,7 @@ Roles are carried in `UserContext` for future use but are not a full RBAC model 
 
 ## Invitation-only Web MVP Interfaces
 
-Status: **Browser Auth and invitations v0.1 implemented; streaming, Session API completion, and the
+Status: **Browser Auth/invitations and streaming v0.1 implemented; Session API completion and the
 production frontend remain planned.**
 
 Canonical contract: `docs/web_mvp_contract.md`.
@@ -304,7 +305,8 @@ or CSRF token. Production Web mode fails closed when browser and dev Bearer cred
 Web Auth Session identity is distinct from dialogue `session_id`. Implemented persistence includes
 credentials, invitation/reset digests, and browser-session digests/expiry/revocation. Raw tokens and
 passwords are never stored. Both raw SQLite and SQLAlchemy-on-SQLite satisfy the same contract tests.
-Chat-request idempotency remains part of the future streaming task.
+Chat-request idempotency is implemented behind `StreamTurnPersistencePort` with atomic reserve,
+complete, fail, replay, conflict detection, and bounded orphan recovery.
 
 The streaming Service boundary is:
 
@@ -315,14 +317,26 @@ class AgentStreamServicePort(Protocol):
         *,
         user_context: UserContext,
         request: StreamChatRequest,
-    ) -> Iterable[ChatStreamEvent]: ...
+    ) -> ChatStreamHandle: ...
+
+
+class ChatStreamHandle(Protocol):
+    request_id: str
+    turn_id: str
+    session_id: str
+    started_event: TurnStarted
+
+    def start(self, *, sink: StreamEventSink) -> None: ...
+    def request_cancel(self, *, reason: str) -> bool: ...
+    def cancel(self, *, reason: str) -> None: ...
+    def close(self) -> None: ...
 ```
 
 The stable public event sequence is `turn.started`, zero or more `response.delta`, and exactly one
 of `turn.completed` / `turn.failed`, plus content-free heartbeat comments. Provider reasoning,
 prompt/Memory/Evidence content, raw chunks, and vectors are not public event fields. HTTP/SSE types
-stay in `app/api`; the Streaming Worker must submit its internal Controller integration design before
-changing runtime code.
+stay in `app/api`. The service delivers provider-neutral domain events through `StreamEventSink`;
+the bounded async bridge and SSE framing are adapter-owned.
 
 Implemented Browser Auth API additions:
 
@@ -334,6 +348,7 @@ GET   /v1/auth/me
 GET   /v1/auth/csrf
 POST  /v1/auth/password/change
 POST  /v1/auth/password-reset/accept
+POST  /v1/chat/stream
 ```
 
 Remaining planned Web API additions:
@@ -343,7 +358,6 @@ PATCH /v1/sessions/{session_id}
 POST  /v1/sessions/{session_id}/end
 POST  /v1/sessions/{session_id}/resume
 POST  /v1/sessions/{session_id}/archive
-POST  /v1/chat/stream
 ```
 
 The remaining paths and responsibilities are frozen; their DTO fields, new error codes, and store

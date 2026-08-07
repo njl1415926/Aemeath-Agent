@@ -62,6 +62,7 @@ def test_caddy_contract_has_exact_raw_limit_and_uses_first_hop_forwarding_defaul
     assert re.search(r"request_body\s*\{\s*max_size 128KiB\s*\}", caddyfile)
     assert "untrusted inbound X-Forwarded-*" in caddyfile
     assert "header_up" not in caddyfile
+    assert "flush_interval" not in caddyfile
     assert not re.search(r"(?m)^\s*log\s", caddyfile)
 
 

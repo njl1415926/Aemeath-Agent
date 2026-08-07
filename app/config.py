@@ -132,6 +132,11 @@ class Settings:
     chat_message_max_chars: int = 4000
     chat_message_max_utf8_bytes: int = 12000
     chat_metadata_max_utf8_bytes: int = 8192
+    stream_response_max_chars: int = 32_768
+    stream_response_max_utf8_bytes: int = 98_304
+    stream_public_delta_max_utf8_bytes: int = 4_096
+    stream_producer_put_timeout_seconds: float = 5.0
+    stream_orphan_recovery_limit: int = 100
     enable_semantic_low_information_skip: bool = True
     environment: str = "dev"
     api_cors_allowed_origins: tuple[str, ...] = ()
@@ -401,6 +406,21 @@ class Settings:
             chat_metadata_max_utf8_bytes=int(
                 os.getenv("AEMEATH_CHAT_METADATA_MAX_UTF8_BYTES", "8192")
             ),
+            stream_response_max_chars=int(
+                os.getenv("AEMEATH_STREAM_RESPONSE_MAX_CHARS", "32768")
+            ),
+            stream_response_max_utf8_bytes=int(
+                os.getenv("AEMEATH_STREAM_RESPONSE_MAX_UTF8_BYTES", "98304")
+            ),
+            stream_public_delta_max_utf8_bytes=int(
+                os.getenv("AEMEATH_STREAM_PUBLIC_DELTA_MAX_UTF8_BYTES", "4096")
+            ),
+            stream_producer_put_timeout_seconds=float(
+                os.getenv("AEMEATH_STREAM_PRODUCER_PUT_TIMEOUT_SECONDS", "5")
+            ),
+            stream_orphan_recovery_limit=int(
+                os.getenv("AEMEATH_STREAM_ORPHAN_RECOVERY_LIMIT", "100")
+            ),
             enable_semantic_low_information_skip=_parse_bool(
                 os.getenv("AEMEATH_SEMANTIC_SKIP_LOW_INFORMATION", "true")
             ),
@@ -579,6 +599,19 @@ class Settings:
             ("AEMEATH_CHAT_MESSAGE_MAX_CHARS", self.chat_message_max_chars),
             ("AEMEATH_CHAT_MESSAGE_MAX_UTF8_BYTES", self.chat_message_max_utf8_bytes),
             ("AEMEATH_CHAT_METADATA_MAX_UTF8_BYTES", self.chat_metadata_max_utf8_bytes),
+            ("AEMEATH_STREAM_RESPONSE_MAX_CHARS", self.stream_response_max_chars),
+            (
+                "AEMEATH_STREAM_RESPONSE_MAX_UTF8_BYTES",
+                self.stream_response_max_utf8_bytes,
+            ),
+            (
+                "AEMEATH_STREAM_PUBLIC_DELTA_MAX_UTF8_BYTES",
+                self.stream_public_delta_max_utf8_bytes,
+            ),
+            (
+                "AEMEATH_STREAM_ORPHAN_RECOVERY_LIMIT",
+                self.stream_orphan_recovery_limit,
+            ),
         )
         for name, value in positive_ints:
             if isinstance(value, bool) or value <= 0:
@@ -587,6 +620,22 @@ class Settings:
             raise ValueError(
                 "AEMEATH_RUNTIME_MAX_EMBEDDING_REQUESTS must be exactly 1 in v0.1."
             )
+        if self.stream_public_delta_max_utf8_bytes < 4:
+            raise ValueError(
+                "AEMEATH_STREAM_PUBLIC_DELTA_MAX_UTF8_BYTES must be at least 4."
+            )
+        if self.stream_response_max_chars > 32_768:
+            raise ValueError("AEMEATH_STREAM_RESPONSE_MAX_CHARS must not exceed 32768.")
+        if self.stream_response_max_utf8_bytes > 98_304:
+            raise ValueError(
+                "AEMEATH_STREAM_RESPONSE_MAX_UTF8_BYTES must not exceed 98304."
+            )
+        if self.stream_public_delta_max_utf8_bytes > 4_096:
+            raise ValueError(
+                "AEMEATH_STREAM_PUBLIC_DELTA_MAX_UTF8_BYTES must not exceed 4096."
+            )
+        if self.stream_orphan_recovery_limit > 500:
+            raise ValueError("AEMEATH_STREAM_ORPHAN_RECOVERY_LIMIT must not exceed 500.")
         nonnegative = (
             (
                 "AEMEATH_RUNTIME_SESSION_WAIT_TIMEOUT_SECONDS",
@@ -608,6 +657,13 @@ class Settings:
         for name, value in nonnegative:
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be non-negative.")
+        if (
+            not math.isfinite(self.stream_producer_put_timeout_seconds)
+            or not 0 < self.stream_producer_put_timeout_seconds <= 60
+        ):
+            raise ValueError(
+                "AEMEATH_STREAM_PRODUCER_PUT_TIMEOUT_SECONDS must be in (0, 60]."
+            )
         positive_floats = (
             ("AEMEATH_API_RATE_LIMIT_IDLE_TTL_SECONDS", self.api_rate_limit_idle_ttl_seconds),
             ("DEEPSEEK_CONNECT_TIMEOUT_SECONDS", self.deepseek_connect_timeout_seconds),
