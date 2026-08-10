@@ -108,7 +108,7 @@ def _create_app_with_runtime(application_runtime: ApplicationRuntime) -> FastAPI
             CORSMiddleware,
             allow_origins=list(resolved_settings.api_cors_allowed_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "PATCH", "POST", "OPTIONS"],
             allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
             expose_headers=["X-Request-ID", "Retry-After"],
         )

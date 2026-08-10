@@ -5,8 +5,6 @@ import sys
 
 _DISABLED_PROFILES = {
     "memory-worker": "memory_worker_gates_not_approved",
-    "ops": "d6_ops_not_implemented",
-    "restore": "d6_restore_not_implemented",
 }
 
 

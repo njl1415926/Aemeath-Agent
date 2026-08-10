@@ -385,7 +385,7 @@ These signatures reflect the implemented v0.1 responsibility boundary. HTTP/SSE 
 2. **T-0143 Streaming Chat Runtime And API v0.1 - accepted**
    Freeze domain events and Controller integration, then implement true DeepSeek-to-browser streaming,
    cancellation, idempotency, persistence, and safe observability.
-3. **T-0144 Web Session API Completion v0.1**
+3. **T-0144 Web Session API Completion v0.1 - accepted**
    Add lifecycle commands, title update, cursor pagination, and ownership tests.
 4. **T-0145 React/Vite Web Frontend v0.1**
    Implement against frozen mock contracts, then integrate Auth, Session, and streaming APIs.

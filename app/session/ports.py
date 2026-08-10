@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Protocol
 
 from app.session.schemas import SessionRecord, SessionStatus
@@ -46,6 +47,27 @@ class SessionStorePort(Protocol):
         status: SessionStatus | None = "active",
         limit: int = 50,
     ) -> list[SessionRecord]:
+        ...
+
+    def list_sessions_page(
+        self,
+        *,
+        user_id: str,
+        character_id: str | None = None,
+        status: SessionStatus | None = "active",
+        limit: int = 50,
+        after_updated_at: datetime | None = None,
+        after_id: str | None = None,
+    ) -> list[SessionRecord]:
+        ...
+
+    def update_session_title(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        title: str | None,
+    ) -> SessionRecord:
         ...
 
     def end_session(self, *, session_id: str, user_id: str) -> SessionRecord:

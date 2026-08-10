@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Barrier
 
 import pytest
 
@@ -10,6 +12,7 @@ from app.session.errors import (
     SessionOwnershipError,
     SessionTransitionError,
 )
+from app.session.pagination import parse_storage_datetime
 
 
 def test_list_sessions_limit_returns_newest_updated_sessions(store, monkeypatch):
@@ -103,6 +106,82 @@ def test_session_message_lifecycle_and_read_model_contract(store):
     assert [session.id for session in character_sessions] == [first.id]
 
 
+def test_title_update_and_keyset_pagination_contract(store, monkeypatch):
+    fixed = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc).isoformat()
+
+    monkeypatch.setattr("app.db.sqlite_store.utc_now", lambda: fixed)
+    monkeypatch.setattr("app.db.repositories.sessions.utc_now", lambda: fixed)
+    monkeypatch.setattr("app.db.repositories.messages.utc_now", lambda: fixed)
+
+    sessions = [
+        store.create_session(user_id="user_1", character_id="aemeath", title=f"Session {i}")
+        for i in range(4)
+    ]
+    archived = store.archive_session(session_id=sessions[0].id, user_id="user_1")
+    with pytest.raises(SessionArchivedError):
+        store.update_session_title(
+            session_id=archived.id,
+            user_id="user_1",
+            title="cannot update archived",
+        )
+
+    updated = store.update_session_title(
+        session_id=sessions[1].id,
+        user_id="user_1",
+        title="Updated",
+    )
+    assert updated.title == "Updated"
+    with pytest.raises(SessionOwnershipError):
+        store.update_session_title(
+            session_id=sessions[1].id,
+            user_id="user_2",
+            title="wrong owner",
+        )
+
+    active_ids_desc = sorted([session.id for session in sessions[1:]], reverse=True)
+    first_page = store.list_sessions_page(user_id="user_1", status="active", limit=2)
+    assert [session.id for session in first_page] == active_ids_desc[:2]
+
+    second_page = store.list_sessions_page(
+        user_id="user_1",
+        status="active",
+        limit=2,
+        after_updated_at=parse_storage_datetime(first_page[-1].updated_at),
+        after_id=first_page[-1].id,
+    )
+    assert [session.id for session in second_page] == active_ids_desc[2:]
+
+
+def test_message_keyset_pagination_uses_storage_time_boundary(store, monkeypatch):
+    fixed = datetime(2026, 1, 1, 12, 30, tzinfo=timezone.utc).isoformat()
+
+    monkeypatch.setattr("app.db.sqlite_store.utc_now", lambda: fixed)
+    monkeypatch.setattr("app.db.repositories.messages.utc_now", lambda: fixed)
+
+    session = store.create_session(user_id="user_1", character_id="aemeath")
+    message_ids = [
+        store.save_message(
+            session_id=session.id,
+            user_id="user_1",
+            role="user",
+            content=f"message {index}",
+        )
+        for index in range(4)
+    ]
+
+    expected_desc = sorted(message_ids, reverse=True)
+    first_page = store.list_messages_by_session_page(session_id=session.id, limit=2)
+    assert [message.id for message in first_page] == expected_desc[:2]
+
+    second_page = store.list_messages_by_session_page(
+        session_id=session.id,
+        limit=2,
+        before_created_at=parse_storage_datetime(first_page[-1].created_at),
+        before_id=first_page[-1].id,
+    )
+    assert [message.id for message in second_page] == expected_desc[2:]
+
+
 def test_ensure_session_and_lifecycle_error_contract(store):
     created = store.ensure_session(
         session_id="opaque-session-id",
@@ -178,3 +257,96 @@ def test_ensure_session_and_lifecycle_error_contract(store):
             user_id="user_1",
             character_id="aemeath",
         )
+
+
+def test_concurrent_archive_cannot_be_revoked_by_end(store, monkeypatch):
+    session = store.create_session(user_id="user_1", character_id="aemeath")
+    _barrier_lifecycle_update_time(store, monkeypatch)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        end_future = executor.submit(
+            store.end_session,
+            session_id=session.id,
+            user_id="user_1",
+        )
+        archive_future = executor.submit(
+            store.archive_session,
+            session_id=session.id,
+            user_id="user_1",
+        )
+        outcomes = [_outcome(end_future), _outcome(archive_future)]
+
+    final = store.get_session(session_id=session.id)
+    assert final is not None
+    assert final.status == "archived"
+    assert any(outcome == "archived" for outcome in outcomes)
+
+
+def test_concurrent_archive_cannot_be_revoked_by_resume(store, monkeypatch):
+    session = store.create_session(user_id="user_1", character_id="aemeath")
+    store.end_session(session_id=session.id, user_id="user_1")
+    _barrier_lifecycle_update_time(store, monkeypatch)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        resume_future = executor.submit(
+            store.resume_session,
+            session_id=session.id,
+            user_id="user_1",
+            character_id="aemeath",
+        )
+        archive_future = executor.submit(
+            store.archive_session,
+            session_id=session.id,
+            user_id="user_1",
+        )
+        outcomes = [_outcome(resume_future), _outcome(archive_future)]
+
+    final = store.get_session(session_id=session.id)
+    assert final is not None
+    assert final.status == "archived"
+    assert any(outcome == "archived" for outcome in outcomes)
+
+
+def test_concurrent_end_does_not_return_active_when_resume_wins(store, monkeypatch):
+    session = store.create_session(user_id="user_1", character_id="aemeath")
+    store.end_session(session_id=session.id, user_id="user_1")
+    _barrier_lifecycle_update_time(store, monkeypatch)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        end_future = executor.submit(
+            store.end_session,
+            session_id=session.id,
+            user_id="user_1",
+        )
+        resume_future = executor.submit(
+            store.resume_session,
+            session_id=session.id,
+            user_id="user_1",
+            character_id="aemeath",
+        )
+        end_outcome = _outcome(end_future)
+        resume_outcome = _outcome(resume_future)
+
+    assert end_outcome != "active"
+    assert resume_outcome in {"active", "transition"}
+
+
+def _outcome(future) -> str:
+    try:
+        return future.result().status
+    except SessionArchivedError:
+        return "archived"
+    except SessionTransitionError:
+        return "transition"
+
+
+def _barrier_lifecycle_update_time(store, monkeypatch) -> None:
+    barrier = Barrier(2)
+    timestamp = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc).isoformat()
+
+    def fake_utc_now():
+        barrier.wait(timeout=5)
+        return timestamp
+
+    monkeypatch.setattr("app.db.sqlite_store.utc_now", fake_utc_now)
+    monkeypatch.setattr("app.db.repositories.sessions.utc_now", fake_utc_now)

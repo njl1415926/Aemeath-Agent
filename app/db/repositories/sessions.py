@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, desc, func
+from sqlalchemy import case, desc, func, or_
 
 from app.db.models import MessageModel, SessionModel
 from app.db.repositories.common import SessionFactory, dump_json, load_json_object
@@ -13,6 +14,7 @@ from app.session.errors import (
     SessionOwnershipError,
     SessionTransitionError,
 )
+from app.session.pagination import format_storage_datetime
 from app.session.schemas import SessionRecord, SessionStatus
 from app.utils.ids import new_id, utc_now
 
@@ -210,6 +212,23 @@ class SessionRepository:
         status: SessionStatus | None = "active",
         limit: int = 50,
     ) -> list[SessionRecord]:
+        return self.list_sessions_page(
+            user_id=user_id,
+            character_id=character_id,
+            status=status,
+            limit=limit,
+        )
+
+    def list_sessions_page(
+        self,
+        *,
+        user_id: str,
+        character_id: str | None = None,
+        status: SessionStatus | None = "active",
+        limit: int = 50,
+        after_updated_at: datetime | None = None,
+        after_id: str | None = None,
+    ) -> list[SessionRecord]:
         if limit <= 0:
             return []
         with self._session_factory() as session:
@@ -218,25 +237,90 @@ class SessionRepository:
                 query = query.filter(SessionModel.character_id == character_id)
             if status is not None:
                 query = query.filter(SessionModel.status == status)
-            rows = query.order_by(desc("updated_at")).limit(limit).all()
+            if after_updated_at is not None and after_id is not None:
+                after = format_storage_datetime(after_updated_at)
+                query = query.having(
+                    or_(
+                        desc("updated_at").element < after,
+                        (desc("updated_at").element == after)
+                        & (SessionModel.id < after_id),
+                    )
+                )
+            rows = query.order_by(desc("updated_at"), SessionModel.id.desc()).limit(limit).all()
         return [self._from_row(row) for row in rows]
+
+    def update_session_title(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        title: str | None,
+    ) -> SessionRecord:
+        with self._session_factory() as session:
+            now = utc_now()
+            affected = (
+                session.query(SessionModel)
+                .filter(
+                    SessionModel.id == session_id,
+                    SessionModel.user_id == user_id,
+                    SessionModel.status.in_(("active", "ended")),
+                )
+                .update(
+                    {
+                        SessionModel.title: title,
+                        SessionModel.updated_at: now,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if affected == 0:
+                session_record = self._get_with_session(session, session_id=session_id)
+                if session_record is None:
+                    raise SessionNotFoundError(f"session {session_id!r} was not found")
+                self._validate_session_ownership(session_record, user_id=user_id)
+                if session_record.status == "archived":
+                    raise SessionArchivedError(f"session {session_id!r} is archived")
+                raise SessionTransitionError(
+                    f"session {session_id!r} title update was not applied"
+                )
+            session.flush()
+            updated = self._get_with_session(session, session_id=session_id)
+            session.commit()
+        if updated is None:
+            raise SessionNotFoundError(f"session {session_id!r} was not found")
+        return updated
 
     def end_session(self, *, session_id: str, user_id: str) -> SessionRecord:
         with self._session_factory() as session:
-            session_record = self._require_owned_session(
-                session,
-                session_id=session_id,
-                user_id=user_id,
+            now = utc_now()
+            affected = (
+                session.query(SessionModel)
+                .filter(
+                    SessionModel.id == session_id,
+                    SessionModel.user_id == user_id,
+                    SessionModel.status == "active",
+                )
+                .update(
+                    {
+                        SessionModel.status: "ended",
+                        SessionModel.ended_at: now,
+                        SessionModel.updated_at: now,
+                    },
+                    synchronize_session=False,
+                )
             )
-            if session_record.status == "archived":
-                raise SessionArchivedError(f"session {session_id!r} is archived")
-            if session_record.status == "active":
-                model = session.get(SessionModel, session_id)
-                now = utc_now()
-                model.status = "ended"  # type: ignore[union-attr]
-                model.ended_at = now  # type: ignore[union-attr]
-                model.updated_at = now  # type: ignore[union-attr]
-                session.flush()
+            if affected == 0:
+                session_record = self._classify_lifecycle_zero_update(
+                    session,
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+                if session_record.status == "ended":
+                    session.commit()
+                    return session_record
+                if session_record.status == "archived":
+                    raise SessionArchivedError(f"session {session_id!r} is archived")
+                raise SessionTransitionError(f"session {session_id!r} could not be ended")
             updated = self._get_with_session(session, session_id=session_id)
             session.commit()
         if updated is None:
@@ -251,24 +335,36 @@ class SessionRepository:
         character_id: str,
     ) -> SessionRecord:
         with self._session_factory() as session:
-            session_record = self._require_owned_session(
-                session,
-                session_id=session_id,
-                user_id=user_id,
-                character_id=character_id,
-            )
-            if session_record.status == "archived":
-                raise SessionArchivedError(f"session {session_id!r} is archived")
-            if session_record.status != "ended":
-                raise SessionTransitionError(
-                    f"session {session_id!r} is not ended and cannot be resumed"
-                )
-            model = session.get(SessionModel, session_id)
             now = utc_now()
-            model.status = "active"  # type: ignore[union-attr]
-            model.ended_at = None  # type: ignore[union-attr]
-            model.updated_at = now  # type: ignore[union-attr]
-            session.flush()
+            affected = (
+                session.query(SessionModel)
+                .filter(
+                    SessionModel.id == session_id,
+                    SessionModel.user_id == user_id,
+                    SessionModel.character_id == character_id,
+                    SessionModel.status == "ended",
+                )
+                .update(
+                    {
+                        SessionModel.status: "active",
+                        SessionModel.ended_at: None,
+                        SessionModel.updated_at: now,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if affected == 0:
+                session_record = self._classify_lifecycle_zero_update(
+                    session,
+                    session_id=session_id,
+                    user_id=user_id,
+                    character_id=character_id,
+                )
+                if session_record.status == "archived":
+                    raise SessionArchivedError(f"session {session_id!r} is archived")
+                raise SessionTransitionError(
+                    f"session {session_id!r} could not be resumed"
+                )
             updated = self._get_with_session(session, session_id=session_id)
             session.commit()
         if updated is None:
@@ -277,20 +373,55 @@ class SessionRepository:
 
     def archive_session(self, *, session_id: str, user_id: str) -> SessionRecord:
         with self._session_factory() as session:
-            session_record = self._require_owned_session(
-                session,
-                session_id=session_id,
-                user_id=user_id,
+            now = utc_now()
+            affected = (
+                session.query(SessionModel)
+                .filter(
+                    SessionModel.id == session_id,
+                    SessionModel.user_id == user_id,
+                    SessionModel.status.in_(("active", "ended")),
+                )
+                .update(
+                    {
+                        SessionModel.status: "archived",
+                        SessionModel.archived_at: now,
+                        SessionModel.updated_at: now,
+                    },
+                    synchronize_session=False,
+                )
             )
-            if session_record.status != "archived":
-                model = session.get(SessionModel, session_id)
-                now = utc_now()
-                model.status = "archived"  # type: ignore[union-attr]
-                model.archived_at = now  # type: ignore[union-attr]
-                model.updated_at = now  # type: ignore[union-attr]
-                session.flush()
+            if affected == 0:
+                session_record = self._classify_lifecycle_zero_update(
+                    session,
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+                if session_record.status == "archived":
+                    session.commit()
+                    return session_record
+                raise SessionTransitionError(
+                    f"session {session_id!r} could not be archived"
+                )
             updated = self._get_with_session(session, session_id=session_id)
             session.commit()
         if updated is None:
             raise SessionNotFoundError(f"session {session_id!r} was not found")
         return updated
+
+    def _classify_lifecycle_zero_update(
+        self,
+        session,
+        *,
+        session_id: str,
+        user_id: str,
+        character_id: str | None = None,
+    ) -> SessionRecord:
+        session_record = self._get_with_session(session, session_id=session_id)
+        if session_record is None:
+            raise SessionNotFoundError(f"session {session_id!r} was not found")
+        self._validate_session_ownership(
+            session_record,
+            user_id=user_id,
+            character_id=character_id,
+        )
+        return session_record

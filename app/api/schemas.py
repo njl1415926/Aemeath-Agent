@@ -92,6 +92,15 @@ class SessionCreateRequestBody(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SessionUpdateRequestBody(BaseModel):
+    character_id: str = Field(min_length=1)
+    title: str | None
+
+
+class SessionLifecycleRequestBody(BaseModel):
+    character_id: str = Field(min_length=1)
+
+
 class SessionResponseBody(BaseModel):
     id: str
     user_id: str
@@ -126,6 +135,8 @@ class SessionResponseBody(BaseModel):
 
 class SessionListResponseBody(BaseModel):
     sessions: list[SessionResponseBody]
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 class MessageResponseBody(BaseModel):
@@ -154,6 +165,8 @@ class MessageResponseBody(BaseModel):
 
 class SessionMessagesResponseBody(BaseModel):
     messages: list[MessageResponseBody]
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 class InvitationAcceptBody(BaseModel):

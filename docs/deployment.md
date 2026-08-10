@@ -45,7 +45,7 @@ Expected user is `10001:10001`; the command is
 
 ## Production configuration and secrets
 
-Start from `deploy/env/prod.env.example`, copy it outside the repository, and set the approved
+Start from `deploy/prod.env.example`, copy it outside the repository, and set the approved
 non-default user ID and exact Caddy container IP. Do not pass that example directly while required
 fields are blank. Production rejects any drift from the frozen API-only profile. Only dev may load
 dotenv, and dotenv is not allowed to switch the initially selected environment to test or prod.
@@ -136,7 +136,7 @@ sudo install -d -o 10001 -g 10001 -m 0750 \
   /var/log/aemeath/trace /var/log/aemeath/prompt
 sudo install -d -o root -g root -m 0750 /etc/aemeath /etc/aemeath/secrets
 sudo install -d -o root -g root -m 0750 /var/backups/aemeath
-sudo install -o root -g root -m 0640 deploy/env/prod.env.example /etc/aemeath/prod.env
+sudo install -o root -g root -m 0640 deploy/prod.env.example /etc/aemeath/prod.env
 ```
 
 The first-release operator contract is controlled root execution: keep the environment file
@@ -166,10 +166,10 @@ sudo docker compose --env-file /etc/aemeath/prod.env config --profiles
 ```
 
 The expected default service list is exactly `api` and `proxy`. The profile list may show
-`memory`, `ops`, and `restore`, but this is not permission to run them. D5 is not approved:
-`memory-worker` has no network, mount, or secret and exits fail-closed. D6 is not implemented:
-the `ops` and `restore` one-shot placeholders also exit fail-closed. Never pass `--profile memory`
-in the first-release startup path.
+`memory`, `ops`, and `restore`, but this is not permission to run them during first-release
+startup. D5 is not approved: `memory-worker` has no network, mount, or secret and exits
+fail-closed. D6 `ops` and `restore` are one-shot backup/restore commands and must only be run
+through the D6 runbook below. Never pass `--profile memory` in the first-release startup path.
 
 Start API first and allow its provider-free `/ready` healthcheck to pass before Caddy accepts
 traffic; the dependency contract also enforces this ordering for a normal start:
@@ -221,8 +221,87 @@ separate Manager authorization.
 
 ## Deferred
 
-D5 Memory Worker WAL/busy-timeout plus lease/stale-recovery gates, D6 backup/restore, D7
-retention/monitoring, and D8 ECS staging drills remain intentionally absent. The D4 real-container
+D5 Memory Worker WAL/busy-timeout plus lease/stale-recovery gates, D7 retention/monitoring, and D8
+ECS staging drills remain intentionally absent. The D4 real-container
 restart/down-up and fault-injection drills passed Manager revalidation on WSL2 Ubuntu 22.04. Later
 ECS reboot, image-replacement, and staging fault drills remain separate gates. T-0140 remains
 pending.
+
+## D6 SQLite Backup, Verify, Restore
+
+D6 adds networkless `ops` and `restore` profile commands for SQLite backup and recovery. These
+commands still use the controlled root operator contract: keep `/etc/aemeath/prod.env` root-only and
+run production Compose through `sudo docker compose --env-file /etc/aemeath/prod.env ...`.
+Production `sqlite_raw` backup refuses placeholder rollback identity: `AEMEATH_APP_IMAGE_DIGEST` and
+`AEMEATH_OPS_IMAGE_DIGEST` must be exact `sha256:<64 hex>` digests, both deploy-lock and rendered
+Compose config hashes must be SHA-256 hex, and `AEMEATH_BUILD_COMMIT` must be the producing Git
+commit.
+
+Nightly backup:
+
+```bash
+sudo docker compose --env-file /etc/aemeath/prod.env \
+  --profile ops run --rm ops
+```
+
+Pre-upgrade backup should record the old immutable deployment identity:
+
+```bash
+sudo docker compose --env-file /etc/aemeath/prod.env \
+  --profile ops run --rm ops \
+  python /opt/aemeath/scripts/deployment/backup_sqlite.py \
+  --db-path /var/lib/aemeath/data/aemeath.db \
+  --backup-root /var/backups/aemeath \
+  --backend sqlite_raw \
+  --label pre-upgrade \
+  --app-image-digest "$OLD_APP_IMAGE_DIGEST" \
+  --ops-image-digest "$OLD_OPS_IMAGE_DIGEST" \
+  --deploy-lock-sha256 "$OLD_DEPLOY_LOCK_SHA256" \
+  --compose-config-sha256 "$OLD_COMPOSE_CONFIG_SHA256" \
+  --git-commit "$OLD_BUILD_COMMIT"
+```
+
+Verify a backup:
+
+```bash
+sudo docker compose --env-file /etc/aemeath/prod.env \
+  --profile ops run --rm ops \
+  python /opt/aemeath/scripts/deployment/verify_sqlite_backup.py \
+  --backup-dir /var/backups/aemeath/backups/YYYY/MM/DD/aemeath-...-bkp_... \
+  --backend sqlite_raw
+```
+
+Restore requires stopped writers and explicit confirmation:
+
+```bash
+sudo docker compose --env-file /etc/aemeath/prod.env stop api
+sudo docker compose --env-file /etc/aemeath/prod.env ps
+sudo docker compose --env-file /etc/aemeath/prod.env \
+  --profile restore run --rm restore \
+  python /opt/aemeath/scripts/deployment/restore_sqlite.py \
+  --data-root /var/lib/aemeath/data \
+  --db-name aemeath.db \
+  --backup-dir /var/backups/aemeath/backups/YYYY/MM/DD/aemeath-...-bkp_... \
+  --journal-root /var/lib/aemeath/data/.restore-journal \
+  --expected-backend sqlite_raw \
+  --confirm-writers-stopped
+sudo docker compose --env-file /etc/aemeath/prod.env up -d api
+sudo docker compose --env-file /etc/aemeath/prod.env up -d proxy
+```
+
+The backup artifact is one generation directory containing `aemeath.db` and immutable
+`manifest.json`. D6 never copies a live DB file directly and never copies live `-wal`/`-shm`
+sidecars into the backup artifact.
+
+The restore journal treats `aemeath.db`, `aemeath.db-wal`, and `aemeath.db-shm` as one old set. Each
+file move has a journaled intent, digest, location, and completion state. After a crash,
+`active.pointer.json` is only a locator/progress hint; the implementation reconciles the verified
+per-restore journal with file locations and digests before continuing.
+The restore command also holds an OS-owned `active.lock` for the whole mutation path; lock file
+existence is not authoritative, and a competing restore fails with `restore_in_progress`.
+
+For upgrade-paired rollback, use the ops image and config recorded in the backup manifest to verify
+and restore the pre-upgrade backup, then start the matching old API/proxy pair. A newer image may
+correctly reject an older schema contract.
+
+D6 does not implement off-ECS transfer, backup pruning, or quarantine pruning.

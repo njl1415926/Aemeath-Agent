@@ -4,14 +4,24 @@ import json
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
+from threading import Event, Thread
+from time import sleep
 from urllib.error import HTTPError
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.accounts.service import AccountService
 from app.api.server import create_app
 from app.auth.service import hash_dev_token
+from app.db.stream_turns import StreamTurnComplete, StreamTurnResolveOrReserve
 from app.errors import ErrorCode
+from app.runtime.guardrails.schemas import DialogueAdmissionRequest
+from app.schemas import StateUpdate
+from app.services.schemas import UserContext
+from app.services.stream_fingerprint import fingerprint_chat_request_v1
+from app.services.stream_schemas import StreamChatRequest
+from app.session.errors import SessionOwnershipError
 from app.utils.ids import new_id
 
 
@@ -159,6 +169,271 @@ def test_api_chat_ended_and_archived_session_errors(settings):
     assert archived_response.json()["error"]["code"] == ErrorCode.SESSION_ARCHIVED.value
 
 
+def test_api_runtime_session_lifecycle_uses_shared_dialogue_admission(settings):
+    client, app = _client(settings)
+    del client
+    runtime = app.state.runtime
+
+    assert runtime.session_service.admission is runtime.agent_service.admission
+    assert runtime.agent_stream_service.admission is runtime.agent_service.admission
+
+
+def test_session_lifecycle_waits_for_active_stream_admission(settings):
+    client, app = _client(
+        replace(
+            settings,
+            runtime_session_wait_timeout_seconds=1.0,
+            runtime_dialogue_max_concurrency=2,
+        )
+    )
+    del client
+    runtime = app.state.runtime
+    user_id = runtime.settings.default_user_id
+    character_id = runtime.settings.default_character_id
+    session = runtime.store.create_session(user_id=user_id, character_id=character_id)
+    user_context = UserContext(user_id=user_id, request_id="req_lifecycle_wait")
+    completed = Event()
+    result: list[str] = []
+    errors: list[BaseException] = []
+
+    def archive_session() -> None:
+        try:
+            archived = runtime.session_service.archive_session(
+                user_context=user_context,
+                session_id=session.id,
+                character_id=character_id,
+            )
+            result.append(archived.status)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    handle = runtime.agent_stream_service.admission.open_handle(
+        request=DialogueAdmissionRequest(
+            user_id=user_id,
+            session_id=session.id,
+            request_id="req_stream_holds_admission",
+        )
+    )
+    try:
+        worker = Thread(target=archive_session)
+        worker.start()
+        sleep(0.05)
+        assert not completed.is_set()
+        assert runtime.store.get_session(session_id=session.id).status == "active"
+    finally:
+        handle.close()
+
+    worker.join(timeout=2)
+    assert completed.is_set()
+    assert errors == []
+    assert result == ["archived"]
+    assert runtime.store.get_session(session_id=session.id).status == "archived"
+    assert runtime.agent_service.admission.entry_count == 0
+
+
+def test_session_lifecycle_waits_for_terminal_replay_handle(settings):
+    client, app = _client(
+        replace(
+            settings,
+            runtime_session_wait_timeout_seconds=1.0,
+            runtime_dialogue_max_concurrency=2,
+        )
+    )
+    del client
+    runtime = app.state.runtime
+    user_id = runtime.settings.default_user_id
+    character_id = runtime.settings.default_character_id
+    session = runtime.store.create_session(user_id=user_id, character_id=character_id)
+    request = StreamChatRequest(
+        session_id=session.id,
+        character_id=character_id,
+        message="hello replay",
+        client_message_id="cm-session-lifecycle-replay",
+        metadata={},
+    )
+    fingerprint = fingerprint_chat_request_v1(
+        character_id=request.character_id,
+        message=request.message,
+        metadata=request.metadata,
+    )
+    reserved = runtime.store.resolve_or_reserve(
+        request=StreamTurnResolveOrReserve(
+            user_id=user_id,
+            session_id=session.id,
+            active_character_id=character_id,
+            client_message_id=request.client_message_id,
+            request_fingerprint_version=1,
+            request_fingerprint=fingerprint,
+            owner_runtime_id=runtime.agent_stream_service.owner_runtime_id,
+            turn_id=new_id("turn"),
+            user_message_id=new_id("message"),
+            user_message_content=request.message,
+        )
+    )
+    completed_record = runtime.store.complete(
+        request=StreamTurnComplete(
+            record_id=reserved.record.id,
+            turn_id=reserved.record.turn_id,
+            user_id=user_id,
+            session_id=session.id,
+            owner_runtime_id=runtime.agent_stream_service.owner_runtime_id,
+            assistant_response="durable replay response",
+            state_update=StateUpdate(
+                user_emotion="neutral",
+                aemeath_mood="calm",
+                trust_delta=0,
+                affection_delta=0,
+                familiarity_delta=0,
+                last_topic=None,
+                reason="test",
+            ),
+            warnings=(),
+        )
+    )
+    replay = runtime.agent_stream_service.stream_chat(
+        user_context=UserContext(user_id=user_id, request_id="req_replay"),
+        request=request,
+    )
+    completed = Event()
+    result: list[str] = []
+    errors: list[BaseException] = []
+
+    def archive_session() -> None:
+        try:
+            archived = runtime.session_service.archive_session(
+                user_context=UserContext(user_id=user_id, request_id="req_archive"),
+                session_id=session.id,
+                character_id=character_id,
+            )
+            result.append(archived.status)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    worker = Thread(target=archive_session)
+    worker.start()
+    sleep(0.05)
+    assert not completed.is_set()
+    assert runtime.store.get_session(session_id=session.id).status == "active"
+
+    replay.close()
+    worker.join(timeout=2)
+
+    assert completed.is_set()
+    assert errors == []
+    assert result == ["archived"]
+    assert completed_record.status == "completed"
+    assert runtime.store.get_session(session_id=session.id).status == "archived"
+    assert runtime.agent_service.admission.entry_count == 0
+
+
+def test_session_lifecycle_failure_releases_admission_and_keeps_stream_durable_result(
+    settings,
+):
+    client, app = _client(settings)
+    del client
+    runtime = app.state.runtime
+    user_id = runtime.settings.default_user_id
+    character_id = runtime.settings.default_character_id
+    session = runtime.store.create_session(user_id=user_id, character_id=character_id)
+    model = runtime.agent_stream_service.model_client.delegate
+    request = StreamChatRequest(
+        session_id=session.id,
+        character_id=character_id,
+        message="durable failure boundary",
+        client_message_id="cm-session-lifecycle-failure",
+        metadata={},
+    )
+    fingerprint = fingerprint_chat_request_v1(
+        character_id=request.character_id,
+        message=request.message,
+        metadata=request.metadata,
+    )
+    reserved = runtime.store.resolve_or_reserve(
+        request=StreamTurnResolveOrReserve(
+            user_id=user_id,
+            session_id=session.id,
+            active_character_id=character_id,
+            client_message_id=request.client_message_id,
+            request_fingerprint_version=1,
+            request_fingerprint=fingerprint,
+            owner_runtime_id=runtime.agent_stream_service.owner_runtime_id,
+            turn_id=new_id("turn"),
+            user_message_id=new_id("message"),
+            user_message_content=request.message,
+        )
+    )
+    completed_record = runtime.store.complete(
+        request=StreamTurnComplete(
+            record_id=reserved.record.id,
+            turn_id=reserved.record.turn_id,
+            user_id=user_id,
+            session_id=session.id,
+            owner_runtime_id=runtime.agent_stream_service.owner_runtime_id,
+            assistant_response="durable still here",
+            state_update=StateUpdate(
+                user_emotion="neutral",
+                aemeath_mood="calm",
+                trust_delta=0,
+                affection_delta=0,
+                familiarity_delta=0,
+                last_topic=None,
+                reason="test",
+            ),
+            warnings=(),
+        )
+    )
+    runtime.store.save_message(
+        session_id=session.id,
+        user_id=user_id,
+        role="user",
+        content="existing user message",
+    )
+    user_context = UserContext(user_id=user_id, request_id="req_lifecycle_failure")
+
+    with pytest.raises(SessionOwnershipError):
+        runtime.session_service.end_session(
+            user_context=user_context,
+            session_id=session.id,
+            character_id="wrong-character",
+        )
+
+    with runtime.agent_service.admission.acquire(
+        request=DialogueAdmissionRequest(user_id=user_id, session_id=session.id)
+    ):
+        pass
+    assert runtime.agent_service.admission.entry_count == 0
+    assert runtime.store.get_session(session_id=session.id).status == "active"
+    assert model.open_count == 0
+    replayed = runtime.store.resolve_or_reserve(
+        request=StreamTurnResolveOrReserve(
+            user_id=user_id,
+            session_id=session.id,
+            active_character_id=character_id,
+            client_message_id=request.client_message_id,
+            request_fingerprint_version=1,
+            request_fingerprint=fingerprint,
+            owner_runtime_id=runtime.agent_stream_service.owner_runtime_id,
+            turn_id=new_id("turn"),
+            user_message_id=new_id("message"),
+            user_message_content=request.message,
+        )
+    )
+    assert replayed.kind == "replay_completed"
+    assert replayed.record.id == completed_record.id
+    assert replayed.assistant_message is not None
+    assert replayed.assistant_message.content == "durable still here"
+    messages = runtime.store.list_messages_by_session(session_id=session.id)
+    assert [message.content for message in messages] == [
+        "durable failure boundary",
+        "durable still here",
+        "existing user message",
+    ]
+
+
 def test_api_sessions_create_list_and_messages(settings):
     client, app = _client(settings)
     character_id = app.state.runtime.settings.default_character_id
@@ -193,6 +468,130 @@ def test_api_sessions_create_list_and_messages(settings):
     assert messages_response.status_code == 200
     messages = messages_response.json()["messages"]
     assert [message["role"] for message in messages] == ["user", "assistant"]
+
+
+def test_api_session_pagination_title_and_lifecycle(settings):
+    client, app = _client(settings)
+    character_id = app.state.runtime.settings.default_character_id
+
+    created_ids: list[str] = []
+    for index in range(3):
+        response = client.post(
+            "/v1/sessions",
+            headers=_auth(),
+            json={"character_id": character_id, "title": f"session {index}"},
+        )
+        assert response.status_code == 201
+        created_ids.append(response.json()["id"])
+
+    first_page = client.get("/v1/sessions?limit=1", headers=_auth())
+    assert first_page.status_code == 200
+    first_payload = first_page.json()
+    assert "sessions" in first_payload
+    assert "items" not in first_payload
+    assert first_payload["has_more"] is True
+    assert len(first_payload["sessions"]) == 1
+
+    second_page = client.get(
+        "/v1/sessions",
+        headers=_auth(),
+        params={"limit": 1, "cursor": first_payload["next_cursor"]},
+    )
+    assert second_page.status_code == 200
+    assert len(second_page.json()["sessions"]) == 1
+
+    session_id = created_ids[0]
+    update = client.patch(
+        f"/v1/sessions/{session_id}",
+        headers=_auth(),
+        json={"character_id": character_id, "title": "  cafe\u0301\t night  "},
+    )
+    assert update.status_code == 200
+    assert update.json()["title"] == "café night"
+
+    zero_width = client.patch(
+        f"/v1/sessions/{session_id}",
+        headers=_auth(),
+        json={"character_id": character_id, "title": "A\u200dB"},
+    )
+    assert zero_width.status_code == 200
+    assert zero_width.json()["title"] == "A\u200dB"
+
+    missing_title = client.patch(
+        f"/v1/sessions/{session_id}",
+        headers=_auth(),
+        json={"character_id": character_id},
+    )
+    assert missing_title.status_code == 400
+    assert missing_title.json()["error"]["code"] == ErrorCode.INVALID_INPUT.value
+    assert app.state.runtime.store.get_session(session_id=session_id).title == "A\u200dB"
+
+    ended = client.post(
+        f"/v1/sessions/{session_id}/end",
+        headers=_auth(),
+        json={"character_id": character_id},
+    )
+    assert ended.status_code == 200
+    assert ended.json()["status"] == "ended"
+
+    resumed = client.post(
+        f"/v1/sessions/{session_id}/resume",
+        headers=_auth(),
+        json={"character_id": character_id},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "active"
+
+    archived = client.post(
+        f"/v1/sessions/{session_id}/archive",
+        headers=_auth(),
+        json={"character_id": character_id},
+    )
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+
+    update_archived = client.patch(
+        f"/v1/sessions/{session_id}",
+        headers=_auth(),
+        json={"character_id": character_id, "title": "blocked"},
+    )
+    assert update_archived.status_code == 409
+    assert update_archived.json()["error"]["code"] == ErrorCode.SESSION_ARCHIVED.value
+
+
+def test_api_invalid_cursor_and_archived_history_contract(settings):
+    client, app = _client(settings)
+    character_id = app.state.runtime.settings.default_character_id
+    user_id = app.state.runtime.settings.default_user_id
+    store = app.state.runtime.store
+    session = store.create_session(user_id=user_id, character_id=character_id)
+    store.save_message(
+        session_id=session.id,
+        user_id=user_id,
+        role="user",
+        content="archived hello",
+    )
+    store.archive_session(session_id=session.id, user_id=user_id)
+
+    invalid = client.get("/v1/sessions", headers=_auth(), params={"cursor": "not-json"})
+    assert invalid.status_code == 400
+    assert invalid.json()["error"] == {
+        "code": ErrorCode.INVALID_INPUT.value,
+        "message": "Invalid cursor.",
+        "retryable": False,
+    }
+    assert "not-json" not in invalid.text
+
+    history = client.get(
+        f"/v1/sessions/{session.id}/messages",
+        headers=_auth(),
+        params={"character_id": character_id},
+    )
+    assert history.status_code == 200
+    payload = history.json()
+    assert "messages" in payload
+    assert "items" not in payload
+    assert payload["messages"][0]["content"] == "archived hello"
 
 
 def test_api_session_messages_reject_cross_user_access(settings):
@@ -261,6 +660,55 @@ def test_api_does_not_leak_sensitive_values_in_response_or_app_log(settings):
     raw_log = log_file.read_text(encoding="utf-8")
     assert "wrong-token-secret" not in raw_log
     assert "real-cookie-secret" not in raw_log
+
+
+def test_api_session_app_logs_safe_success_and_failure_summaries(settings):
+    secret_title = "secret title marker"
+    raw_cursor = "bad-cursor!"
+    api_settings = replace(
+        settings,
+        enable_app_log=True,
+        app_log_root=settings.db_path.parent / ".aemeath" / "app_logs",
+        dev_auth_token="correct-dev-token",
+    )
+    app = create_app(api_settings)
+    client = TestClient(app)
+    character_id = app.state.runtime.settings.default_character_id
+
+    created = client.post(
+        "/v1/sessions",
+        headers=_auth(),
+        json={"character_id": character_id, "title": secret_title},
+    )
+    assert created.status_code == 201
+    session_id = created.json()["id"]
+    patched = client.patch(
+        f"/v1/sessions/{session_id}",
+        headers=_auth(),
+        json={"character_id": character_id, "title": secret_title + " updated"},
+    )
+    assert patched.status_code == 200
+    failed = client.get("/v1/sessions", headers=_auth(), params={"cursor": raw_cursor})
+    assert failed.status_code == 400
+
+    [log_file] = list(api_settings.app_log_root.glob("*/*/*/*.jsonl"))
+    raw_log = log_file.read_text(encoding="utf-8")
+    assert secret_title not in raw_log
+    assert raw_cursor not in raw_log
+    records = [
+        json.loads(line)
+        for line in raw_log.splitlines()
+        if line.strip()
+    ]
+    by_name = {record["event_name"]: record for record in records}
+    assert by_name["api.session.created"]["payload"]["title_length"] == len(secret_title)
+    assert "duration_ms" in by_name["api.session.created"]["payload"]
+    assert by_name["api.session.title_updated"]["payload"]["title_action"] == "set"
+    assert by_name["api.session.failed"]["error_code"] == ErrorCode.INVALID_INPUT.value
+    assert (
+        by_name["api.session.failed"]["payload"]["cursor_error_reason"]
+        == "invalid_base64url_charset"
+    )
 
 
 def test_api_prompt_run_log_is_disabled_by_default_even_when_cli_default_is_enabled(settings):

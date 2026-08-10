@@ -35,9 +35,9 @@ app-log behavior at the HTTP adapter boundary.
 ## 2026-08-04 Invitation-only Web MVP Target
 
 The Manager-frozen Web target is documented in `docs/web_mvp_contract.md`. Browser Auth and
-invitation runtime support is implemented under T-0142, and the streaming runtime/API is implemented
-under T-0143. Session API completion, the frontend, and production Web-profile activation remain
-gated work:
+invitation runtime support is implemented under T-0142, the streaming runtime/API under T-0143, and
+the Web Session API under T-0144. The frontend and production Web-profile activation remain gated
+work:
 
 ```text
 Browser
@@ -62,10 +62,33 @@ synchronous `AgentService` path remains compatible while the future Web frontend
 implemented streaming path. Caddy serves static assets and API from one HTTPS origin, so production
 CORS remains empty and the final image does not run Node.js.
 
-Implementation is split into T-0142 through T-0146. T-0142 and T-0143 are accepted; D6 backup may
-proceed against the frozen Auth and streaming persistence schemas. T-0144 through T-0146 remain the
-Session API, frontend, security/quota, and browser E2E work. D7 must observe final Web events, and D8
-remains the real-cloud acceptance gate.
+Implementation is split into T-0142 through T-0146. T-0142 through T-0144 are accepted; D6 backup may
+proceed against the frozen Auth, streaming, and Session persistence schemas. T-0145 and T-0146 remain
+the frontend, security/quota, and browser E2E work. D7 must observe final Web events, and D8 remains
+the real-cloud acceptance gate.
+
+## 2026-08-07 Web Session API v0.1
+
+Browser-facing dialogue Session management remains an application-service boundary:
+
+```text
+Session HTTP routes
+  -> Browser Cookie or dev Bearer Auth + CSRF/provenance
+  -> SessionService
+  -> SessionStorePort / MessageStore
+  -> raw SQLite or SQLAlchemy-on-SQLite adapter
+```
+
+`SessionService` owns title normalization, owner/character checks, lifecycle policy, strict cursor
+decoding, and public page construction. API routes own only HTTP DTO conversion and dependency
+wiring; they do not access SQL or repositories. Session and message listings use bounded keyset
+pagination with opaque canonical cursors. Archived history is owner-readable, but archived Sessions
+cannot be resumed, edited, or used for new turns.
+
+End, resume, and archive commands acquire the same process-local `(user_id, session_id)` dialogue
+admission used by `AgentService` and `AgentStreamService`. This serializes lifecycle changes with
+active turns and terminal replay delivery. Persistence still uses expected-status conditional
+updates, so raw SQLite and SQLAlchemy-on-SQLite preserve the same behavior under concurrent commands.
 
 ## 2026-08-06 Streaming Chat Runtime And API v0.1
 
@@ -92,7 +115,7 @@ close. HTTP/SSE framing, heartbeat, Cookie/CSRF details, and downstream disconne
 The active registry, admission locks, rate limits, and LLM gate are process-local, so production
 streaming remains restricted to one Uvicorn worker. Streaming Prompt Logs are summary-only and
 content-safe. Production Web-profile activation and real-browser/cloud acceptance remain gated by
-T-0144 through T-0146 and deployment D6-D8.
+T-0145, T-0146, and deployment D6-D8.
 
 ## 2026-07-26 Embedding Foundation And Artifact Persistence
 

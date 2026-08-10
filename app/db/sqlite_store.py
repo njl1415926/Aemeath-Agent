@@ -77,6 +77,7 @@ from app.session.errors import (
     SessionOwnershipError,
     SessionTransitionError,
 )
+from app.session.pagination import format_storage_datetime
 from app.session.schemas import SessionRecord, SessionStatus
 from app.utils.ids import new_id, utc_now
 
@@ -1061,6 +1062,23 @@ class SQLiteStore:
         status: SessionStatus | None = "active",
         limit: int = 50,
     ) -> list[SessionRecord]:
+        return self.list_sessions_page(
+            user_id=user_id,
+            character_id=character_id,
+            status=status,
+            limit=limit,
+        )
+
+    def list_sessions_page(
+        self,
+        *,
+        user_id: str,
+        character_id: str | None = None,
+        status: SessionStatus | None = "active",
+        limit: int = 50,
+        after_updated_at=None,
+        after_id: str | None = None,
+    ) -> list[SessionRecord]:
         if limit <= 0:
             return []
         conditions = ["s.user_id = ?"]
@@ -1071,6 +1089,14 @@ class SQLiteStore:
         if status is not None:
             conditions.append("s.status = ?")
             params.append(status)
+        having = ""
+        if after_updated_at is not None and after_id is not None:
+            having = """
+                HAVING updated_at < ?
+                   OR (updated_at = ? AND s.id < ?)
+            """
+            after = format_storage_datetime(after_updated_at)
+            params.extend([after, after, after_id])
         params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(
@@ -1078,32 +1104,70 @@ class SQLiteStore:
                 + f"""
                 WHERE {" AND ".join(conditions)}
                 GROUP BY s.id
-                ORDER BY updated_at DESC
+                {having}
+                ORDER BY updated_at DESC, s.id DESC
                 LIMIT ?
                 """,
                 params,
             ).fetchall()
         return [self._session_from_row(row) for row in rows]
 
+    def update_session_title(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        title: str | None,
+    ) -> SessionRecord:
+        with self._connect() as conn:
+            now = utc_now()
+            cursor = conn.execute(
+                """
+                UPDATE sessions
+                SET title = ?, updated_at = ?
+                WHERE id = ?
+                  AND user_id = ?
+                  AND status IN ('active', 'ended')
+                """,
+                (title, now, session_id, user_id),
+            )
+            if cursor.rowcount == 0:
+                session = self._get_session_with_conn(conn, session_id=session_id)
+                if session is None:
+                    raise SessionNotFoundError(f"session {session_id!r} was not found")
+                self._validate_session_ownership(session, user_id=user_id)
+                if session.status == "archived":
+                    raise SessionArchivedError(f"session {session_id!r} is archived")
+                raise SessionTransitionError(
+                    f"session {session_id!r} title update was not applied"
+                )
+            updated = self._get_session_with_conn(conn, session_id=session_id)
+        if updated is None:
+            raise SessionNotFoundError(f"session {session_id!r} was not found")
+        return updated
+
     def end_session(self, *, session_id: str, user_id: str) -> SessionRecord:
         with self._connect() as conn:
-            session = self._require_owned_session(
-                conn,
-                session_id=session_id,
-                user_id=user_id,
+            now = utc_now()
+            cursor = conn.execute(
+                """
+                UPDATE sessions
+                SET status = 'ended', ended_at = ?, updated_at = ?
+                WHERE id = ? AND user_id = ? AND status = 'active'
+                """,
+                (now, now, session_id, user_id),
             )
-            if session.status == "archived":
-                raise SessionArchivedError(f"session {session_id!r} is archived")
-            if session.status == "active":
-                now = utc_now()
-                conn.execute(
-                    """
-                    UPDATE sessions
-                    SET status = 'ended', ended_at = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, now, session_id),
+            if cursor.rowcount == 0:
+                session = self._classify_lifecycle_zero_update(
+                    conn,
+                    session_id=session_id,
+                    user_id=user_id,
                 )
+                if session.status == "ended":
+                    return session
+                if session.status == "archived":
+                    raise SessionArchivedError(f"session {session_id!r} is archived")
+                raise SessionTransitionError(f"session {session_id!r} could not be ended")
             updated = self._get_session_with_conn(conn, session_id=session_id)
         if updated is None:
             raise SessionNotFoundError(f"session {session_id!r} was not found")
@@ -1117,27 +1181,27 @@ class SQLiteStore:
         character_id: str,
     ) -> SessionRecord:
         with self._connect() as conn:
-            session = self._require_owned_session(
-                conn,
-                session_id=session_id,
-                user_id=user_id,
-                character_id=character_id,
-            )
-            if session.status == "archived":
-                raise SessionArchivedError(f"session {session_id!r} is archived")
-            if session.status != "ended":
-                raise SessionTransitionError(
-                    f"session {session_id!r} is not ended and cannot be resumed"
-                )
             now = utc_now()
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE sessions
                 SET status = 'active', ended_at = NULL, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND user_id = ? AND character_id = ? AND status = 'ended'
                 """,
-                (now, session_id),
+                (now, session_id, user_id, character_id),
             )
+            if cursor.rowcount == 0:
+                session = self._classify_lifecycle_zero_update(
+                    conn,
+                    session_id=session_id,
+                    user_id=user_id,
+                    character_id=character_id,
+                )
+                if session.status == "archived":
+                    raise SessionArchivedError(f"session {session_id!r} is archived")
+                raise SessionTransitionError(
+                    f"session {session_id!r} could not be resumed"
+                )
             updated = self._get_session_with_conn(conn, session_id=session_id)
         if updated is None:
             raise SessionNotFoundError(f"session {session_id!r} was not found")
@@ -1145,25 +1209,48 @@ class SQLiteStore:
 
     def archive_session(self, *, session_id: str, user_id: str) -> SessionRecord:
         with self._connect() as conn:
-            session = self._require_owned_session(
-                conn,
-                session_id=session_id,
-                user_id=user_id,
+            now = utc_now()
+            cursor = conn.execute(
+                """
+                UPDATE sessions
+                SET status = 'archived', archived_at = ?, updated_at = ?
+                WHERE id = ? AND user_id = ? AND status IN ('active', 'ended')
+                """,
+                (now, now, session_id, user_id),
             )
-            if session.status != "archived":
-                now = utc_now()
-                conn.execute(
-                    """
-                    UPDATE sessions
-                    SET status = 'archived', archived_at = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, now, session_id),
+            if cursor.rowcount == 0:
+                session = self._classify_lifecycle_zero_update(
+                    conn,
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+                if session.status == "archived":
+                    return session
+                raise SessionTransitionError(
+                    f"session {session_id!r} could not be archived"
                 )
             updated = self._get_session_with_conn(conn, session_id=session_id)
         if updated is None:
             raise SessionNotFoundError(f"session {session_id!r} was not found")
         return updated
+
+    def _classify_lifecycle_zero_update(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str,
+        user_id: str,
+        character_id: str | None = None,
+    ) -> SessionRecord:
+        session = self._get_session_with_conn(conn, session_id=session_id)
+        if session is None:
+            raise SessionNotFoundError(f"session {session_id!r} was not found")
+        self._validate_session_ownership(
+            session,
+            user_id=user_id,
+            character_id=character_id,
+        )
+        return session
 
     def _validate_session_ownership(
         self,
@@ -1326,6 +1413,38 @@ class SQLiteStore:
                 ORDER BY created_at ASC
                 """,
                 (session_id,),
+            ).fetchall()
+        return [MessageRecord(**dict(row)) for row in rows]
+
+    def list_messages_by_session_page(
+        self,
+        *,
+        session_id: str,
+        limit: int,
+        before_created_at=None,
+        before_id: str | None = None,
+    ) -> list[MessageRecord]:
+        if limit <= 0:
+            return []
+        conditions = ["session_id = ?"]
+        params: list[Any] = [session_id]
+        if before_created_at is not None and before_id is not None:
+            before = format_storage_datetime(before_created_at)
+            conditions.append("(created_at < ? OR (created_at = ? AND id < ?))")
+            params.extend([before, before, before_id])
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    id, session_id, user_id, role, content, created_at, emotion_label,
+                    importance_score
+                FROM messages
+                WHERE {" AND ".join(conditions)}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                params,
             ).fetchall()
         return [MessageRecord(**dict(row)) for row in rows]
 

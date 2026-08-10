@@ -25,7 +25,7 @@ def test_explicit_dev_cors_origin_gets_narrow_headers(settings):
     assert response.status_code == 200
     assert response.headers["Access-Control-Allow-Origin"] == "https://client.example.test"
     assert response.headers.get("Access-Control-Allow-Credentials") != "true"
-    assert response.headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
+    assert response.headers["Access-Control-Allow-Methods"] == "GET, PATCH, POST, OPTIONS"
 
 
 def test_empty_cors_allowlist_emits_no_cross_origin_permission(settings):

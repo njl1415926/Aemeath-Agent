@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -181,6 +182,38 @@ class SqlAlchemyStore:
             limit=limit,
         )
 
+    def list_sessions_page(
+        self,
+        *,
+        user_id: str,
+        character_id: str | None = None,
+        status: SessionStatus | None = "active",
+        limit: int = 50,
+        after_updated_at: datetime | None = None,
+        after_id: str | None = None,
+    ) -> list[SessionRecord]:
+        return self.sessions.list_sessions_page(
+            user_id=user_id,
+            character_id=character_id,
+            status=status,
+            limit=limit,
+            after_updated_at=after_updated_at,
+            after_id=after_id,
+        )
+
+    def update_session_title(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        title: str | None,
+    ) -> SessionRecord:
+        return self.sessions.update_session_title(
+            session_id=session_id,
+            user_id=user_id,
+            title=title,
+        )
+
     def end_session(self, *, session_id: str, user_id: str) -> SessionRecord:
         return self.sessions.end_session(session_id=session_id, user_id=user_id)
 
@@ -251,6 +284,21 @@ class SqlAlchemyStore:
 
     def list_messages_by_session(self, *, session_id: str) -> list[MessageRecord]:
         return self.messages.list_messages_by_session(session_id=session_id)
+
+    def list_messages_by_session_page(
+        self,
+        *,
+        session_id: str,
+        limit: int,
+        before_created_at: datetime | None = None,
+        before_id: str | None = None,
+    ) -> list[MessageRecord]:
+        return self.messages.list_messages_by_session_page(
+            session_id=session_id,
+            limit=limit,
+            before_created_at=before_created_at,
+            before_id=before_id,
+        )
 
     def create_memory(
         self,

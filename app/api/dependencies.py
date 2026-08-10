@@ -113,7 +113,12 @@ def build_api_runtime(
     return ApiRuntime(
         agent_service=agent_service,
         agent_stream_service=agent_stream_service,
-        session_service=SessionService(session_store=store, message_store=store),
+        session_service=SessionService(
+            session_store=store,
+            message_store=store,
+            app_logger=agent_service.app_logger,
+            admission=agent_service.admission,
+        ),
         auth_service=AuthService(account_service),
         local_default_resolver=LocalDefaultAccountResolver(
             account_service=account_service,

@@ -129,6 +129,43 @@ def test_all_auth_endpoints_cookie_rotation_no_store_and_general_csrf(settings):
     assert reset_accepted.headers["Cache-Control"] == "no-store"
 
 
+def test_web_session_lifecycle_mutations_require_csrf(settings):
+    client, app = _web_client(settings)
+    _accept_invitation(client, app)
+    csrf = _csrf(client)
+    created = client.post(
+        "/v1/sessions",
+        headers={**PROVENANCE, "X-CSRF-Token": csrf},
+        json={"character_id": "aemeath"},
+    )
+    assert created.status_code == 201
+    session_id = created.json()["id"]
+
+    missing_patch_csrf = client.patch(
+        f"/v1/sessions/{session_id}",
+        headers=PROVENANCE,
+        json={"character_id": "aemeath", "title": "blocked"},
+    )
+    assert missing_patch_csrf.status_code == 403
+    assert missing_patch_csrf.json()["error"]["code"] == ErrorCode.CSRF_INVALID.value
+
+    patched = client.patch(
+        f"/v1/sessions/{session_id}",
+        headers={**PROVENANCE, "X-CSRF-Token": csrf},
+        json={"character_id": "aemeath", "title": "allowed"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["title"] == "allowed"
+
+    missing_end_csrf = client.post(
+        f"/v1/sessions/{session_id}/end",
+        headers=PROVENANCE,
+        json={"character_id": "aemeath"},
+    )
+    assert missing_end_csrf.status_code == 403
+    assert missing_end_csrf.json()["error"]["code"] == ErrorCode.CSRF_INVALID.value
+
+
 @pytest.mark.parametrize(
     ("headers", "expected_code"),
     [

@@ -385,6 +385,14 @@ def store_schema_info(db_path: Path, *, backend: str) -> StoreSchemaInfo:
     )
 
 
+def validate_browser_auth_schema_readonly(connection: sqlite3.Connection) -> str:
+    """Validate the Browser Auth schema without creating or migrating objects."""
+
+    _validate_schema(connection)
+    _require_foreign_keys_clean(connection)
+    return _schema_contract_fingerprint(connection)
+
+
 def _validate_schema(connection: sqlite3.Connection) -> None:
     accounts = _table_columns(connection, "accounts")
     column = accounts.get("username_normalized")

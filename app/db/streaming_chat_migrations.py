@@ -201,6 +201,17 @@ def ensure_streaming_chat_schema(db_path: Path) -> None:
         _require_foreign_keys_clean(connection)
 
 
+def validate_streaming_chat_schema_readonly(connection: sqlite3.Connection) -> None:
+    """Validate the current streaming schema without creating or migrating objects."""
+
+    if not _table_exists(connection, STREAMING_CHAT_IDEMPOTENCY_TABLE):
+        raise StorageMigrationRequiredError(reason="streaming_chat_table_missing")
+    if STREAMING_CHAT_IDEMPOTENCY_MIGRATION_ID not in _migration_markers(connection):
+        raise StorageMigrationRequiredError(reason="streaming_chat_marker_missing")
+    _validate_schema(connection, expected_checks=_EXPECTED_CHECKS)
+    _require_foreign_keys_clean(connection)
+
+
 def _upgrade_v1_table(connection: sqlite3.Connection) -> None:
     if _table_exists(connection, _V1_TABLE):
         raise StorageMigrationRequiredError(reason="streaming_chat_v1_upgrade_temp_exists")

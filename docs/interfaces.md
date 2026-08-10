@@ -338,7 +338,7 @@ prompt/Memory/Evidence content, raw chunks, and vectors are not public event fie
 stay in `app/api`. The service delivers provider-neutral domain events through `StreamEventSink`;
 the bounded async bridge and SSE framing are adapter-owned.
 
-Implemented Browser Auth API additions:
+Implemented Browser Auth, streaming, and Session API additions:
 
 ```text
 POST  /v1/auth/invitations/accept
@@ -349,20 +349,22 @@ GET   /v1/auth/csrf
 POST  /v1/auth/password/change
 POST  /v1/auth/password-reset/accept
 POST  /v1/chat/stream
-```
-
-Remaining planned Web API additions:
-
-```text
 PATCH /v1/sessions/{session_id}
 POST  /v1/sessions/{session_id}/end
 POST  /v1/sessions/{session_id}/resume
 POST  /v1/sessions/{session_id}/archive
 ```
 
-The remaining paths and responsibilities are frozen; their DTO fields, new error codes, and store
-method signatures remain subject to each task's Manager-reviewed design. Browser Auth production
-activation remains gated by the later Web security and deployment acceptance tasks.
+Session list and message-history responses expose `sessions` or `messages`, `next_cursor`, and
+`has_more`. Cursors are opaque canonical Base64URL JSON bound to the endpoint filters; malformed,
+non-canonical, overlong, or filter-mismatched cursors fail as `INVALID_INPUT`. Session limits are
+`1..200`; message-history limits are `1..500`.
+
+`SessionService` validates owner and character before data access. End, resume, and archive share the
+same `DialogueAdmissionPort` instance as sync and streaming chat, keyed by `(user_id, session_id)`.
+Archived history is readable by its owner, while archived mutation and chat remain rejected.
+Browser Auth production activation remains gated by the later Web security and deployment acceptance
+tasks.
 
 ## Core Turn Contract
 

@@ -229,3 +229,29 @@ AEMEATH_DB_BACKEND=sqlite_raw
 
 `SQLiteStore` remains in place and continues to be the default until manager approval explicitly
 changes it.
+
+## SQLite Backup And Restore
+
+D6 production backup targets `sqlite_raw` only. Online backup uses Python's SQLite backup API against
+a read-only source connection and publishes each backup as one generation directory containing
+`aemeath.db` plus immutable `manifest.json`. Direct copying of the live database or live WAL/SHM
+sidecars is forbidden.
+Production backup manifests must include exact app and ops image digests, deploy-lock hash, rendered
+Compose config hash, and Git commit; placeholder identity is rejected before publication.
+
+Verification is independent and read-only: it checks manifest hash and size, SQLite integrity,
+`foreign_key_check`, exact schema/migration contracts, active Memory identity index structure,
+deployment identity fields, and safe count buckets. It must not instantiate `SQLiteStore` or
+`SqlAlchemyStore`, because those paths may create or migrate schema.
+
+Restore is a writer-stopped operation. It quarantines the old `aemeath.db`, `aemeath.db-wal`, and
+`aemeath.db-shm` as one set with per-file journal intents and digest/location reconciliation, then
+installs the verified candidate main DB without old sidecars. `active.pointer.json` is only a
+locator/progress hint; after a crash, the verified per-restore journal and filesystem/digest
+reconciliation are authoritative.
+An OS-owned restore lock serializes the whole mutation path, and candidate installation uses a
+journaled temp-file publication protocol so crashes after live DB publication can resume or roll back.
+
+Production restore hard-rejects SQLAlchemy manifests in D6 v0.1. Local/dev SQLAlchemy-on-SQLite
+verification remains only a compatibility check for the file mechanics, not a production recovery
+path.

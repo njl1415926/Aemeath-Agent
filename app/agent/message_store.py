@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from app.schemas import MessageRecord
@@ -24,3 +25,12 @@ class MessageStore(Protocol):
     def list_messages_by_session(self, *, session_id: str) -> list[MessageRecord]:
         ...
 
+    def list_messages_by_session_page(
+        self,
+        *,
+        session_id: str,
+        limit: int,
+        before_created_at: datetime | None = None,
+        before_id: str | None = None,
+    ) -> list[MessageRecord]:
+        ...

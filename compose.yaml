@@ -141,8 +141,25 @@ services:
       - ops
     command:
       - python
-      - /opt/aemeath/scripts/deployment/profile_guard.py
-      - ops
+      - /opt/aemeath/scripts/deployment/backup_sqlite.py
+      - --db-path
+      - /var/lib/aemeath/data/aemeath.db
+      - --backup-root
+      - /var/backups/aemeath
+      - --backend
+      - sqlite_raw
+      - --label
+      - nightly
+      - --app-image-digest
+      - ${AEMEATH_APP_IMAGE_DIGEST:-unknown}
+      - --ops-image-digest
+      - ${AEMEATH_OPS_IMAGE_DIGEST:-unknown}
+      - --deploy-lock-sha256
+      - ${AEMEATH_DEPLOY_LOCK_SHA256:-unknown}
+      - --compose-config-sha256
+      - ${AEMEATH_COMPOSE_CONFIG_SHA256:-unknown}
+      - --git-commit
+      - ${AEMEATH_BUILD_COMMIT:-unknown}
     network_mode: none
     volumes:
       - type: bind
@@ -167,8 +184,7 @@ services:
       - restore
     command:
       - python
-      - /opt/aemeath/scripts/deployment/profile_guard.py
-      - restore
+      - /opt/aemeath/scripts/deployment/restore_sqlite.py
     network_mode: none
     volumes:
       - type: bind

@@ -2114,6 +2114,66 @@ Manager D4 revalidation on 2026-07-31:
   design. D5 remains blocked on its separately approved WAL/busy-timeout and fenced
   lease/stale-recovery gates.
 
+Manager D6 design acceptance on 2026-08-07:
+- Accepted the revised online backup, independent read-only verify, and journaled restore design
+  after per-file crash reconciliation, terminal pointer retirement, exact old-image paired rollback,
+  generation-directory publication, and total backup deadline were added.
+- Production D6 remains `sqlite_raw`, read-only/no-checkpoint for online backup, networkless for ops
+  profiles, and fail-closed for SQLAlchemy restore. Offsite transfer and automatic retention remain
+  deferred.
+- D6 implementation is authorized. The active pointer is only a locator/progress hint; a validated
+  per-restore journal and filesystem/digest reconciliation are authoritative after a crash.
+- T-0140 remains `pending` until implementation, full regression, Linux read-only WAL validation,
+  and a staging backup/restore drill pass Manager review.
+
+Manager D6 implementation review on 2026-08-07:
+- The online backup, read-only verify, generation publication, old-set journaling, pointer retirement,
+  networkless profiles, and current focused regression passed review.
+- D6 remains `Changes Requested`: no inter-process restore lock exists; candidate installation cannot
+  recover from a crash after live publication but before the durable stage update; production backups
+  can publish `unknown` deployment identities; and the advertised total deadline does not cover
+  post-copy verification/publication preparation.
+- Manager reproduced the restore race, candidate-install reentry failure, and post-copy deadline
+  overrun. Required repairs and acceptance evidence are recorded in
+  `docs/agents_communication/deployment_d6_sqlite_backup_restore_v0_1_implementation_manager_review.md`.
+- Docker Compose staging remains an independent environment gate. T-0140 stays `pending`; D6 is not
+  accepted and the tools must not be used on the real project database.
+
+Manager D6 repair re-review on 2026-08-07:
+- Accepted the OS-owned restore lock, candidate install reconciliation, production identity validation,
+  and pre-commit total-deadline repairs. Windows focused D6/Compose validation passed with `33 passed,
+  2 skipped`; Ruff, compileall, and deploy-lock validation also passed.
+- D6 remains `Changes Requested`: required `${VAR:?}` interpolation in the inactive ops profile breaks
+  default D4 Compose startup; explicit rollback from a `prepared` journal can move the untouched live
+  DB away before proving rollback material; and parent-directory fsync failure after the generation
+  commit is still reported as an ambiguous pre-commit publication failure.
+- Reproduction evidence and narrow repair requirements are recorded in
+  `docs/agents_communication/deployment_d6_sqlite_backup_restore_v0_1_repair_manager_review.md`.
+- Linux-only process serialization and the real Compose staging drill remain environment gates. T-0140
+  stays `pending`, and the current restore CLI remains prohibited against the real project database.
+
+Manager D6 third review on 2026-08-07:
+- Accepted the inactive-profile fallback, rollback stage matrix, and post-commit durability-uncertain
+  result. Focused D6/Compose validation passed with `42 passed, 2 skipped`; Ruff, compileall, and
+  deploy-lock validation passed.
+- One release-asset blocker remains: `deploy/env/prod.env.example` is excluded by `.gitignore` and is not
+  tracked, so clean clones and server checkouts do not receive the production template referenced by
+  deployment docs and Compose tests. The Worker must move it to a tracked path or add a narrow exception
+  that cannot expose real env files.
+- Once the template is tracked, D6 code can be considered implementation-complete. T-0140 remains
+  `pending` until Linux-only process serialization and the isolated Docker Compose staging drill pass
+  Manager review.
+
+Manager D6 code acceptance on 2026-08-08:
+- Accepted `deploy/prod.env.example` as the non-secret, non-ignored production template and confirmed
+  deployment docs and Compose tests use the new tracked-layout path. The next commit must include the
+  currently untracked template file.
+- Manager focused validation passed with `42 passed, 2 skipped`; Ruff, compileall, and deploy-lock
+  validation passed. All D6 implementation and release-asset findings are closed.
+- D6 is implementation-complete, but T-0140 remains `pending`. Final environment acceptance still
+  requires the Ubuntu Linux-only two-process restore test and an isolated Docker Compose staging drill;
+  no test or review may operate on the real project database.
+
 ### T-0141 Invitation-only Web MVP Contract v0.1
 
 Status: `done`
@@ -2335,16 +2395,36 @@ Manager final acceptance (2026-08-06):
 - Manager synchronized `docs/architecture.md`, `docs/interfaces.md`, and
   `docs/web_mvp_contract.md` with the implemented `ChatStreamHandle`, active streaming endpoint, and
   current task gates.
-- No blocking or non-blocking T-0143 finding remains. T-0143 is `done`; T-0144 Web Session API and
-  T-0140 D6 backup/restore are the next launch-path tasks and may proceed independently.
+- No blocking or non-blocking T-0143 finding remains. T-0143 is `done`; its accepted contracts are
+  the baseline for T-0144 Web Session API and T-0140 D6 backup/restore work.
 
 ### T-0144 Web Session API Completion v0.1
 
-Status: `pending`
+Status: `done`
 
 Scope:
 - title update, end/resume/archive endpoints, cursor pagination, Web DTOs, ownership and lifecycle
   tests. No browser hard-delete endpoint in v0.1.
+
+Manager final acceptance (2026-08-07):
+- Added title update and owner/character-scoped end, resume, and archive endpoints through the thin
+  `SessionService`; routes do not access repositories or SQL directly.
+- Added strict opaque keyset cursors for Session lists and message history. Cursor decoding is
+  canonical and fail-closed; service limits are Session `1..200` and Message `1..500`.
+- Archived history remains explicitly readable by its owner, while archived chat, resume, and title
+  mutation remain blocked. Browser hard delete remains out of scope.
+- Raw SQLite and SQLAlchemy-on-SQLite implementations have parity for title mutation, lifecycle
+  conditional updates, stable pagination, and concurrent lifecycle behavior.
+- Lifecycle commands share the exact `(user_id, session_id)` dialogue admission instance used by
+  synchronous and streaming chat. Validation, persistence, and terminal App Log recording remain
+  inside the admission boundary, preventing lifecycle changes from overtaking active streams or
+  terminal replay delivery.
+- App Log records content-safe Session operation summaries without titles, cursor values, message
+  content, credentials, or provider data.
+- Manager verification passed: focused T-0144 suite `62 passed`; full suite `825 passed, 2 skipped`;
+  `python -m ruff check app tests`, `python -m compileall -q app`, and `git diff --check` passed.
+- No schema/model migration was required. T-0144 is accepted and `done`; T-0145 frontend work may
+  now implement against the frozen Auth, Session, sync chat, and streaming API contracts.
 
 ### T-0145 React/Vite Web Frontend v0.1
 

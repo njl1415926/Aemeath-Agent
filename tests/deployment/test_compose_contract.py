@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = PROJECT_ROOT / "compose.yaml"
 CADDY_DOCKERFILE_PATH = PROJECT_ROOT / "deploy" / "Caddy.Dockerfile"
 CADDY_CONTEXT_IGNORE_PATH = PROJECT_ROOT / "deploy" / "Caddy.Dockerfile.dockerignore"
+PROD_ENV_EXAMPLE_PATH = PROJECT_ROOT / "deploy" / "prod.env.example"
 
 
 def _compose_document() -> dict[str, object]:
@@ -137,7 +138,7 @@ def test_compose_volume_and_secret_scope_is_least_privilege():
     assert "siliconflow" not in COMPOSE_PATH.read_text(encoding="utf-8").lower()
 
 
-def test_disabled_profiles_are_explicit_and_fail_closed():
+def test_profiles_are_explicit_and_d6_ops_restore_are_enabled():
     document = _compose_document()
     services = document["services"]
 
@@ -148,22 +149,68 @@ def test_disabled_profiles_are_explicit_and_fail_closed():
         service = services[service_name]
         assert service["network_mode"] == "none"
         assert service["restart"] == "no"
-        assert service["command"] == [
-            "python",
-            "/opt/aemeath/scripts/deployment/profile_guard.py",
-            service_name,
-        ]
-    assert "app.memory.worker" not in COMPOSE_PATH.read_text(encoding="utf-8")
+    assert services["memory-worker"]["command"] == [
+        "python",
+        "/opt/aemeath/scripts/deployment/profile_guard.py",
+        "memory-worker",
+    ]
+    assert services["ops"]["command"] == [
+        "python",
+        "/opt/aemeath/scripts/deployment/backup_sqlite.py",
+        "--db-path",
+        "/var/lib/aemeath/data/aemeath.db",
+        "--backup-root",
+        "/var/backups/aemeath",
+        "--backend",
+        "sqlite_raw",
+        "--label",
+        "nightly",
+        "--app-image-digest",
+        "${AEMEATH_APP_IMAGE_DIGEST:-unknown}",
+        "--ops-image-digest",
+        "${AEMEATH_OPS_IMAGE_DIGEST:-unknown}",
+        "--deploy-lock-sha256",
+        "${AEMEATH_DEPLOY_LOCK_SHA256:-unknown}",
+        "--compose-config-sha256",
+        "${AEMEATH_COMPOSE_CONFIG_SHA256:-unknown}",
+        "--git-commit",
+        "${AEMEATH_BUILD_COMMIT:-unknown}",
+    ]
+    assert services["restore"]["command"] == [
+        "python",
+        "/opt/aemeath/scripts/deployment/restore_sqlite.py",
+    ]
+    compose_text = COMPOSE_PATH.read_text(encoding="utf-8")
+    assert "app.memory.worker" not in compose_text
+    for variable in (
+        "AEMEATH_APP_IMAGE_DIGEST",
+        "AEMEATH_OPS_IMAGE_DIGEST",
+        "AEMEATH_DEPLOY_LOCK_SHA256",
+        "AEMEATH_COMPOSE_CONFIG_SHA256",
+        "AEMEATH_BUILD_COMMIT",
+    ):
+        assert f"${{{variable}:?" not in compose_text
     assert "include" not in document
     assert "extends" not in document
+
+
+def test_production_env_template_is_tracked_release_asset():
+    template = PROD_ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+
+    assert "AEMEATH_APP_IMAGE_DIGEST=" in template
+    assert "AEMEATH_OPS_IMAGE_DIGEST=" in template
+    assert "AEMEATH_DEPLOY_LOCK_SHA256=" in template
+    assert "AEMEATH_COMPOSE_CONFIG_SHA256=" in template
+    assert "AEMEATH_BUILD_COMMIT=" in template
+    assert "DEEPSEEK_API_KEY=" not in template
 
 
 @pytest.mark.parametrize(
     ("profile", "reason"),
     [
         ("memory-worker", "memory_worker_gates_not_approved"),
-        ("ops", "d6_ops_not_implemented"),
-        ("restore", "d6_restore_not_implemented"),
+        ("ops", "profile_not_allowed"),
+        ("restore", "profile_not_allowed"),
     ],
 )
 def test_profile_guard_returns_safe_nonzero_status(profile: str, reason: str):
@@ -182,13 +229,52 @@ def test_profile_guard_returns_safe_nonzero_status(profile: str, reason: str):
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker CLI is unavailable")
+def test_docker_compose_default_config_does_not_require_d6_identity():
+    environment = os.environ.copy()
+    for key in (
+        "AEMEATH_APP_IMAGE_DIGEST",
+        "AEMEATH_OPS_IMAGE_DIGEST",
+        "AEMEATH_DEPLOY_LOCK_SHA256",
+        "AEMEATH_COMPOSE_CONFIG_SHA256",
+        "AEMEATH_BUILD_COMMIT",
+    ):
+        environment.pop(key, None)
+    environment.update(
+        {
+            "AEMEATH_DOMAIN": "agent.example.test",
+            "AEMEATH_ENV_FILE": str(PROD_ENV_EXAMPLE_PATH),
+            "AEMEATH_IMAGE": "aemeath-agent:d4-contract-test",
+        }
+    )
+
+    completed = subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_PATH), "config", "-q"],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker CLI is unavailable")
 def test_docker_compose_cli_accepts_only_safe_queries():
     environment = os.environ.copy()
     environment.update(
         {
             "AEMEATH_DOMAIN": "agent.example.test",
-            "AEMEATH_ENV_FILE": str(PROJECT_ROOT / "deploy" / "env" / "prod.env.example"),
+            "AEMEATH_ENV_FILE": str(PROD_ENV_EXAMPLE_PATH),
             "AEMEATH_IMAGE": "aemeath-agent:d4-contract-test",
+            "AEMEATH_APP_IMAGE_DIGEST": "sha256:" + "a" * 64,
+            "AEMEATH_OPS_IMAGE_DIGEST": "sha256:" + "b" * 64,
+            "AEMEATH_DEPLOY_LOCK_SHA256": "c" * 64,
+            "AEMEATH_COMPOSE_CONFIG_SHA256": "d" * 64,
+            "AEMEATH_BUILD_COMMIT": "e" * 40,
         }
     )
     base_command = ["docker", "compose", "-f", str(COMPOSE_PATH)]
