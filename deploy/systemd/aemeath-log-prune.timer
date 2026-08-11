@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Aemeath JSONL retention daily
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=aemeath-log-prune.service
+
+[Install]
+WantedBy=timers.target

@@ -139,3 +139,18 @@ into `DialogueController`. Future CLI, service, API, and worker operation work c
 Post-header disconnects are recorded as `client_disconnected` without exception text. Trace terminal
 status and durable terminal reason use the same first-wins cancellation classification; response
 delta text is never copied into App Log or Trace Log.
+
+## Production Retention And Host Signals
+
+The production Web profile keeps Prompt Log disabled. Docker stdout/stderr uses the Compose `local`
+driver with bounded rotation. Host JSONL retention is handled by
+`scripts/deployment/prune_jsonl.py`:
+
+- App Log: 30 days and 512 MiB;
+- Trace Log: 14 days and 1 GiB;
+- one-hour active-file grace, symlink rejection, dry-run by default, and pre-delete stat recheck.
+
+`scripts/deployment/check_host_health.py` reads only bounded recent App Log input and emits aggregate
+counts for API 5xx, Provider failures, quota rejections, malformed records, and scan truncation. It
+does not echo event payloads, paths, identifiers, prompts, responses, or credentials. The systemd
+timer and operator commands are defined in `docs/deployment.md`.

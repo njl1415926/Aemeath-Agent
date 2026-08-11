@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Aemeath host health every five minutes
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+AccuracySec=30s
+Persistent=true
+Unit=aemeath-host-health.service
+
+[Install]
+WantedBy=timers.target

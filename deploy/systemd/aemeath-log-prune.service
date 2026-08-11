@@ -1,0 +1,18 @@
+[Unit]
+Description=Aemeath JSONL log retention
+ConditionPathIsDirectory=/var/log/aemeath/app
+ConditionPathIsDirectory=/var/log/aemeath/trace
+
+[Service]
+Type=oneshot
+User=10001
+Group=10001
+WorkingDirectory=/opt/aemeath
+ExecStart=/usr/bin/python3 /opt/aemeath/scripts/deployment/prune_jsonl.py --kind app --retention-days 30 --max-total-bytes 536870912 --apply
+ExecStart=/usr/bin/python3 /opt/aemeath/scripts/deployment/prune_jsonl.py --kind trace --retention-days 14 --max-total-bytes 1073741824 --apply
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/aemeath
+UMask=0027

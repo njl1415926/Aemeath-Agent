@@ -1,8 +1,8 @@
-# Deployment v0.1 - D1-D4 and Web Phase 3 Lite operator contract
+# Deployment v0.1 - D1-D7 and Web Phase 3 Lite operator contract
 
-Status: D1–D4 accepted; T-0140 remains pending.
-This is not yet a complete ECS runbook because backup/restore, retention, Memory Worker gates,
-and ECS validation remain later work.
+Status: D1-D4 and D6-D7 accepted; D5 remains disabled and D8 remains pending.
+This is not yet a complete ECS runbook because the Memory Worker gates and real ECS staging
+acceptance remain open.
 
 ## Fixed first-release boundary
 
@@ -321,3 +321,82 @@ and restore the pre-upgrade backup, then start the matching old API/proxy pair. 
 correctly reject an older schema contract.
 
 D6 does not implement off-ECS transfer, backup pruning, or quarantine pruning.
+
+## D7 Host Operations
+
+D7 keeps the first release deliberately small. Docker stdout/stderr already uses Compose's `local`
+logging driver with `10m` files and five retained files. App and Trace JSONL are separate host files,
+so they use the bounded `prune_jsonl.py` utility rather than renaming an active file with generic
+`logrotate`. Production Prompt Log remains disabled.
+
+The frozen JSONL policies are:
+
+| Log | Age | Size cap | Schedule |
+|---|---:|---:|---|
+| App | 30 days | 512 MiB | daily |
+| Trace | 14 days | 1 GiB | daily |
+| Prompt | disabled | n/a | none |
+
+The pruner only considers regular `.jsonl` files below the selected App or Trace root. It never
+follows symlinks, defaults to dry-run, protects files modified in the last hour, and revalidates
+size/mtime immediately before deletion. If active or changed files prevent the size target, it exits
+with code `3` instead of deleting them.
+
+Run a manual dry-run before enabling the timer:
+
+```bash
+sudo -u '#10001' /usr/bin/python3 scripts/deployment/prune_jsonl.py \
+  --kind app --retention-days 30 --max-total-bytes 536870912
+sudo -u '#10001' /usr/bin/python3 scripts/deployment/prune_jsonl.py \
+  --kind trace --retention-days 14 --max-total-bytes 1073741824
+```
+
+Install and validate the D7 units from the deployment checkout at `/opt/aemeath`:
+
+```bash
+sudo install -o root -g root -m 0644 deploy/systemd/aemeath-*.service \
+  deploy/systemd/aemeath-*.timer /etc/systemd/system/
+sudo systemd-analyze verify /etc/systemd/system/aemeath-*.service \
+  /etc/systemd/system/aemeath-*.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now aemeath-backup.timer \
+  aemeath-log-prune.timer aemeath-host-health.timer
+sudo systemctl list-timers 'aemeath-*'
+```
+
+`aemeath-backup.timer` runs the existing networkless D6 `ops` profile nightly at approximately
+03:15. Its deployment identity comes from `/etc/aemeath/prod.env`; placeholder values still fail
+closed. `aemeath-log-prune.timer` starts at approximately 04:15, after the nightly backup window.
+Both timers use `Persistent=true`, so a missed run is started after the host returns.
+
+`aemeath-host-health.timer` runs every five minutes and emits one aggregate JSON object to the
+systemd journal. It checks:
+
+- API and proxy are both `running` and `healthy`;
+- data, log, and backup filesystems retain at least 2 GiB and 10 percent free space;
+- the latest valid D6 manifest is no older than 36 hours;
+- the last 15 minutes of bounded App Log input contain no API 5xx or Provider failure;
+- quota rejection count does not exceed five in the same window.
+
+The check never prints request/session/user IDs, prompt/response content, raw log lines, credentials,
+or backup paths. Exit `0` means healthy, `1` means warning/critical, and `2` means the check itself
+could not run. Before the first successful backup, `backup_missing_or_stale` is expected and must not
+be silenced; run and verify the first D6 backup.
+
+Minimum operator commands:
+
+```bash
+sudo systemctl status aemeath-backup.timer aemeath-log-prune.timer \
+  aemeath-host-health.timer
+sudo journalctl -u aemeath-host-health.service --since '-30 minutes' --no-pager
+sudo journalctl -u aemeath-backup.service -n 50 --no-pager
+sudo systemctl start aemeath-host-health.service
+sudo systemctl start aemeath-backup.service
+sudo docker compose --env-file /etc/aemeath/prod.env ps
+df -h /var/lib/aemeath /var/log/aemeath /var/backups/aemeath
+```
+
+An external notification target is intentionally not embedded in v0.1. On ECS, route non-zero
+service results or journal matches to the chosen CloudMonitor/Sentry/email integration during D8.
+Do not put webhook tokens in unit files. D7 also does not prune D6 backup generations or restore
+quarantine; those require a separate retention design and an off-ECS copy policy.

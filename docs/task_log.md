@@ -2174,6 +2174,26 @@ Manager D6 code acceptance on 2026-08-08:
   requires the Ubuntu Linux-only two-process restore test and an isolated Docker Compose staging drill;
   no test or review may operate on the real project database.
 
+Manager D6 environment acceptance on 2026-08-11:
+- Built the committed API and Caddy images for Linux/amd64 and completed an isolated Compose Web
+  Session/SSE/quota drill without touching the real database, `.env`, or Provider credentials.
+- Online backup and independent verify passed while API was running. After an isolated data mutation,
+  restore returned the account, Session, four messages, and two settled quota reservations to the
+  verified snapshot; `PRAGMA integrity_check` returned `ok`.
+- Two concurrent Linux restore containers were serialized: the winner retired its journal, the loser
+  returned exit `31` / `restore_in_progress`, and no loser journal was created. D6 environment gates
+  are accepted.
+
+Manager D7 acceptance on 2026-08-11:
+- Added bounded App/Trace JSONL retention with dry-run default, symlink/path safety, active-file grace,
+  age/size policies, and pre-delete stat revalidation.
+- Added a safe aggregate host-health check for resident containers, disk headroom, backup freshness,
+  API 5xx, Provider failures, quota rejections, malformed logs, and bounded scan completeness.
+- Added persistent nightly D6 backup, daily JSONL prune, and five-minute host-health systemd timers,
+  plus install/troubleshooting runbooks. External notification routing remains a D8 provider decision.
+- D7 is accepted. T-0140 remains `pending` because D5 stays disabled and D8 real ECS staging/reboot,
+  DNS/TLS, production secret, and alert-routing gates have not run.
+
 ### T-0141 Invitation-only Web MVP Contract v0.1
 
 Status: `done`

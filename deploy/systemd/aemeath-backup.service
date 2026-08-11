@@ -1,0 +1,17 @@
+[Unit]
+Description=Aemeath nightly SQLite backup
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/etc/aemeath/prod.env
+ConditionPathExists=/opt/aemeath/compose.yaml
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/aemeath
+ExecStart=/usr/bin/docker compose --env-file /etc/aemeath/prod.env --profile ops run --rm ops
+TimeoutStartSec=30min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+UMask=0027

@@ -1,0 +1,18 @@
+[Unit]
+Description=Aemeath host deployment health check
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/etc/aemeath/prod.env
+ConditionPathExists=/opt/aemeath/compose.yaml
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/aemeath
+ExecStart=/usr/bin/python3 /opt/aemeath/scripts/deployment/check_host_health.py
+TimeoutStartSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+UMask=0027

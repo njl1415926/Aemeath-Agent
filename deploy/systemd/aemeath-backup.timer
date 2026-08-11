@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Aemeath SQLite backup nightly
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=aemeath-backup.service
+
+[Install]
+WantedBy=timers.target
