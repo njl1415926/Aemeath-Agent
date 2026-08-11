@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
+from app.api.routes.chat import sync_chat_disabled_for_production_web
 from app.config import Settings
 
 
@@ -35,6 +37,43 @@ def test_stream_runtime_environment_names_match_frozen_defaults(monkeypatch):
     assert settings.stream_public_delta_max_utf8_bytes == 4000
     assert settings.stream_producer_put_timeout_seconds == 4
     assert settings.stream_orphan_recovery_limit == 99
+
+
+def test_usage_quota_environment_names_match_phase2_contract(monkeypatch):
+    monkeypatch.setenv("AEMEATH_USAGE_QUOTA_ENABLED", "true")
+    monkeypatch.setenv("AEMEATH_USAGE_QUOTA_DAILY_TURN_LIMIT", "25")
+    monkeypatch.setenv("AEMEATH_USAGE_QUOTA_DAILY_TOKEN_LIMIT", "12345")
+    monkeypatch.setenv("AEMEATH_USAGE_QUOTA_RETRY_AFTER_SECONDS", "37")
+    monkeypatch.setenv("AEMEATH_USAGE_QUOTA_ESTIMATOR_VERSION", "prompt_utf8_v0_1")
+
+    settings = Settings.from_env()
+
+    assert settings.usage_quota_enabled is True
+    assert settings.usage_quota_daily_turn_limit == 25
+    assert settings.usage_quota_daily_token_limit == 12345
+    assert settings.usage_quota_retry_after_seconds == 37
+    settings.validate()
+
+
+def test_usage_quota_enabled_requires_qualified_token_limit(settings):
+    with pytest.raises(ValueError, match="AEMEATH_USAGE_QUOTA_DAILY_TOKEN_LIMIT"):
+        replace(settings, usage_quota_enabled=True, usage_quota_daily_token_limit=None).validate()
+
+
+def test_sync_chat_is_disabled_only_for_production_web_profile(settings):
+    prod_web = SimpleNamespace(
+        settings=replace(settings, environment="prod", api_auth_mode="web_session")
+    )
+    prod_api = SimpleNamespace(
+        settings=replace(settings, environment="prod", api_auth_mode="dev_bearer")
+    )
+    dev_web = SimpleNamespace(
+        settings=replace(settings, environment="dev", api_auth_mode="web_session")
+    )
+
+    assert sync_chat_disabled_for_production_web(runtime=prod_web)
+    assert not sync_chat_disabled_for_production_web(runtime=prod_api)
+    assert not sync_chat_disabled_for_production_web(runtime=dev_web)
 
 
 @pytest.mark.parametrize(

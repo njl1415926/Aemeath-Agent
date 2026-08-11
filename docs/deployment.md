@@ -1,4 +1,4 @@
-# Deployment v0.1 — D1–D4 operator contract
+# Deployment v0.1 - D1-D4 and Web Phase 3 Lite operator contract
 
 Status: D1–D4 accepted; T-0140 remains pending.
 This is not yet a complete ECS runbook because backup/restore, retention, Memory Worker gates,
@@ -12,7 +12,7 @@ and ECS validation remain later work.
 - Long-term Memory is disabled and no Memory Worker or SiliconFlow secret is allowed.
 - The active evidence path remains `WorldInfoEvidenceProvider`; no vector RAG is activated.
 - Context Budget is enabled, CORS is empty, model fallback/mock/local default user/hash embedding
-  are disabled, and static Bearer auth is limited to the approved closed single-user test.
+  are disabled, and the public profile uses invitation-only Cookie Sessions with daily quota.
 
 ## Image contract
 
@@ -47,7 +47,7 @@ Expected user is `10001:10001`; the command is
 
 Start from `deploy/prod.env.example`, copy it outside the repository, and set the approved
 non-default user ID and exact Caddy container IP. Do not pass that example directly while required
-fields are blank. Production rejects any drift from the frozen API-only profile. Only dev may load
+fields are blank. Production rejects any drift from the frozen Web profile. Only dev may load
 dotenv, and dotenv is not allowed to switch the initially selected environment to test or prod.
 
 Secrets are file mounts, not environment values:
@@ -55,11 +55,11 @@ Secrets are file mounts, not environment values:
 | Variable | Required container file | Purpose |
 |---|---|---|
 | `DEEPSEEK_API_KEY_FILE` | `/run/secrets/deepseek_api_key` | DeepSeek chat API |
-| `AEMEATH_DEV_AUTH_TOKEN_FILE` | `/run/secrets/api_bearer_token` | closed-test Bearer token |
+| `AEMEATH_WEB_AUTH_CSRF_KEY_FILE` | `/run/secrets/web_auth_csrf_key` | Cookie Session CSRF derivation |
 
 `_FILE` is an Aemeath application convention; Docker Compose does not automatically translate it.
-The resolver rejects plaintext plus `_FILE`, production plaintext, any path other than the two
-fixed paths above, legacy `OPENAI_API_KEY`, empty or oversized content, invalid UTF-8, NUL, and
+The resolver rejects plaintext plus `_FILE`, production plaintext, any path other than an approved
+fixed path, legacy `OPENAI_API_KEY`, empty or oversized content, invalid UTF-8, NUL, and
 residual CR/LF. It removes one final LF or one final CRLF and preserves all other characters.
 Production preflight rejects symlinks in the file or any parent component and requires Linux
 runtime identity `10001:10001`, file owner/group `root:10001`, and exact mode `0440`; the runtime
@@ -105,8 +105,10 @@ the existing synchronous `ApplicationRuntime.close()`.
 - Production CORS is an empty JSON list. Dev/test allowlists are exact origins only; wildcard,
   userinfo, path, query, and fragment are rejected.
 
-`deploy/Caddyfile` overwrites inbound `X-Forwarded-*`, applies `request_body max_size 128KiB`
-before proxying, and has no access-log directive. The D3 Caddy image reference is pinned in
+`deploy/Caddyfile` overwrites inbound `X-Forwarded-*`, applies `request_body max_size 128KiB` to API
+requests, denies synchronous `POST /v1/chat`, serves the Vite SPA, and has no access-log directive.
+It applies the reviewed CSP, frame, content-type, referrer, and permissions headers. HSTS remains a
+D8 public-domain decision. The D3 Caddy image reference is pinned in
 `deploy/caddy-image.lock`. Caddy documents `request_body` as experimental; Manager explicitly
 accepted this risk, but actual Content-Length/chunked boundary tests remain mandatory in D4/D8.
 See the [Caddy request body directive](https://caddyserver.com/docs/caddyfile/directives/request_body)
@@ -124,8 +126,10 @@ listens as non-root on container ports 8080/8443, and is the only service publis
 80/443. Both resident services use a read-only root filesystem, dropped capabilities,
 `no-new-privileges`, a bounded `/tmp` tmpfs, Docker's rotating
 `local` log driver, and explicit graceful-stop windows.
-`deploy/Caddy.Dockerfile.dockerignore` excludes the entire build context because the derived image
-does not copy repository files.
+`deploy/Caddy.Dockerfile` copies only the reviewed Caddyfile and prebuilt `web/dist`. Run `npm ci`,
+`npm test`, and `npm run build` in `web/` before building the proxy image. Vite emits content-hashed
+JavaScript, CSS, avatar, and background assets. Only `/assets/*` receives immutable caching;
+`index.html` remains `no-cache`.
 
 Create production host paths before the first start:
 
@@ -145,16 +149,17 @@ root:root `0640`, keep `/etc/aemeath` root-traversable only, edit the non-secret
 make the environment file or Secret paths world-readable and do not treat membership in the Docker
 group as permission to bypass this contract.
 
-Set `AEMEATH_DOMAIN`,
-`AEMEATH_DEFAULT_USER_ID`, `AEMEATH_DEV_AUTH_USER_ID`, and an immutable `AEMEATH_IMAGE` tag or
-digest. The two user IDs must be the same approved non-default value. Install each secret from a
-controlled input without placing its value in shell history, then enforce the D2 source contract:
+Set `AEMEATH_DOMAIN`, `AEMEATH_WEB_PUBLIC_ORIGIN`, `AEMEATH_DEFAULT_USER_ID`, and an immutable
+`AEMEATH_IMAGE` tag or digest. The public origin must be the exact HTTPS origin for the domain. The
+invitation-test quota is frozen at 50 turns and 200,000 `prompt_utf8_v0_1` estimated tokens per UTC
+day; this is a cost guard, not Provider billing parity. Install each secret from a controlled input
+without placing its value in shell history, then enforce the D2 source contract:
 
 ```bash
 sudo chown root:10001 /etc/aemeath/secrets/deepseek_api_key \
-  /etc/aemeath/secrets/api_bearer_token
+  /etc/aemeath/secrets/web_auth_csrf_key
 sudo chmod 0440 /etc/aemeath/secrets/deepseek_api_key \
-  /etc/aemeath/secrets/api_bearer_token
+  /etc/aemeath/secrets/web_auth_csrf_key
 ```
 
 Validate only structure; do not save or upload a full rendered Compose configuration:
@@ -171,6 +176,16 @@ startup. D5 is not approved: `memory-worker` has no network, mount, or secret an
 fail-closed. D6 `ops` and `restore` are one-shot backup/restore commands and must only be run
 through the D6 runbook below. Never pass `--profile memory` in the first-release startup path.
 
+Build the Web artifact before the proxy image:
+
+```bash
+cd web
+npm ci
+npm test
+npm run build
+cd ..
+```
+
 Start API first and allow its provider-free `/ready` healthcheck to pass before Caddy accepts
 traffic; the dependency contract also enforces this ordering for a normal start:
 
@@ -181,7 +196,8 @@ sudo docker compose --env-file /etc/aemeath/prod.env up -d proxy
 ```
 
 Check that only `aemeath-api-1` and `aemeath-proxy-1` exist, both are healthy, API has no published
-port, and proxy alone publishes 80/443. Verify `/health`, `/ready`, authentication, CORS, 128 KiB
+port, and proxy alone publishes 80/443. Verify `/health`, `/ready`, Cookie authentication, SPA
+fallback, security headers, direct rejection of synchronous `/v1/chat`, CORS, 128 KiB
 Content-Length/chunked boundaries, and spoofed XFF through HTTPS without sending a real Provider
 request. Caddy certificate/config state lives in `aemeath_caddy_data` and
 `aemeath_caddy_config`; application SQLite/JSONL state lives only in the approved bind mounts.

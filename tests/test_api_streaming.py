@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from contextlib import contextmanager
 from dataclasses import replace
 from threading import Event, Thread
@@ -304,6 +305,36 @@ def test_stream_endpoint_emits_exact_order_headers_and_request_id(settings) -> N
     assert events[-1][1]["status"] == "completed"
     assert "id:" not in response.text
     assert "retry:" not in response.text
+
+
+def test_stream_endpoint_returns_429_retry_after_when_daily_quota_exhausted(settings) -> None:
+    app, session = _dev_app_and_session(
+        settings,
+        usage_quota_enabled=True,
+        usage_quota_daily_turn_limit=5,
+        usage_quota_daily_token_limit=1,
+        usage_quota_retry_after_seconds=11,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/stream",
+            headers=_DEV_AUTH,
+            json=_stream_body(session_id=session.id, key="cm-quota-429"),
+        )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "11"
+    assert response.json()["error"]["code"] == ErrorCode.USAGE_QUOTA_EXCEEDED.value
+    with sqlite3.connect(app.state.runtime.settings.db_path) as connection:
+        stream_count = connection.execute(
+            "SELECT COUNT(*) FROM chat_request_idempotency"
+        ).fetchone()[0]
+        quota_count = connection.execute(
+            "SELECT COUNT(*) FROM usage_quota_reservations"
+        ).fetchone()[0]
+    assert stream_count == 0
+    assert quota_count == 0
 
 
 def test_provider_failure_after_headers_is_safe_sse_terminal(settings) -> None:

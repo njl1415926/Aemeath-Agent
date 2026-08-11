@@ -7,4 +7,7 @@ RUN addgroup -S -g 10002 caddy \
     && setcap -r /usr/bin/caddy \
     && chown -R 10002:10002 /data /config
 
+COPY --chown=10002:10002 deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --chown=10002:10002 web/dist /srv/aemeath-web
+
 USER 10002:10002

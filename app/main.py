@@ -34,7 +34,9 @@ from app.observability.ports import AppLoggerPort
 from app.observability.prompt_run_logger import JsonlPromptRunLogger
 from app.observability.runtime import create_app_logger
 from app.observability.safe import SafeTraceLogger
+from app.observability.schemas import AppLogRecord
 from app.observability.trace_logger import JsonlTraceLogger
+from app.quota.service import PromptUtf8UsageQuotaPolicy
 from app.retrieval.provider import WorldInfoEvidenceProvider
 from app.runtime.guardrails.admission import InProcessDialogueAdmission
 from app.runtime.guardrails.concurrency import (
@@ -51,7 +53,11 @@ from app.semantic.disabled import DisabledSemanticQueryCoordinator
 from app.semantic.eligibility import DeterministicSemanticEligibilityPolicyV01
 from app.semantic.query_builder import NeutralTurnQueryBuilderV01
 from app.services.agent_service import AgentService
-from app.services.agent_stream_service import AgentStreamService, StreamServiceLimits
+from app.services.agent_stream_service import (
+    AgentStreamService,
+    StreamQuotaSettings,
+    StreamServiceLimits,
+)
 from app.state.classifier import StateUpdateClassifier
 from app.utils.ids import new_id
 
@@ -75,10 +81,19 @@ def build_application_runtime(
         _bootstrap_accounts(settings=resolved, store=store)
         owner_runtime_id = new_id("runtime")
         if surface == "api":
-            store.fail_orphan_if_owned_by_other_runtime(
-                owner_runtime_id=owner_runtime_id,
-                limit=resolved.stream_orphan_recovery_limit,
-            )
+            if resolved.usage_quota_enabled:
+                _recover_stream_orphans_with_quota(
+                    store=store,
+                    owner_runtime_id=owner_runtime_id,
+                    limit=resolved.stream_orphan_recovery_limit,
+                    app_logger=app_logger,
+                )
+            else:
+                _recover_legacy_stream_orphans(
+                    store=store,
+                    owner_runtime_id=owner_runtime_id,
+                    limit=resolved.stream_orphan_recovery_limit,
+                )
         llm_gate = ConcurrencyGate(
             limit=resolved.runtime_llm_max_concurrency,
             wait_timeout_seconds=resolved.runtime_llm_wait_timeout_seconds,
@@ -219,10 +234,25 @@ def build_application_runtime(
                 name="active_stream_registry",
                 close=active_stream_registry.close,
             )
+            quota_policy = PromptUtf8UsageQuotaPolicy() if resolved.usage_quota_enabled else None
+            quota_settings = None
+            if resolved.usage_quota_enabled:
+                assert resolved.usage_quota_daily_token_limit is not None
+                quota_settings = StreamQuotaSettings(
+                    daily_turn_limit=resolved.usage_quota_daily_turn_limit,
+                    daily_token_limit=resolved.usage_quota_daily_token_limit,
+                    retry_after_seconds=resolved.usage_quota_retry_after_seconds,
+                    estimator_version=resolved.usage_quota_estimator_version,
+                    context_budget_max_chars=resolved.context_budget_max_chars,
+                    max_output_tokens=resolved.deepseek_max_output_tokens,
+                )
             agent_stream_service = AgentStreamService(
                 turn_engine=controller.turn_engine,
                 model_client=streaming_model,
                 persistence=store,
+                quota_persistence=store if resolved.usage_quota_enabled else None,
+                quota_policy=quota_policy,
+                quota_settings=quota_settings,
                 admission=admission,
                 input_limit_policy=input_limit_policy,
                 active_stream_registry=active_stream_registry,
@@ -256,6 +286,72 @@ def build_application_runtime(
     except BaseException:
         resources.close()
         raise
+
+
+def _recover_stream_orphans_with_quota(
+    *,
+    store: StoreFacade,
+    owner_runtime_id: str,
+    limit: int,
+    app_logger: AppLoggerPort,
+) -> None:
+    recovered_count = 0
+    released_count = 0
+    settled_count = 0
+    batch_count = 0
+    while True:
+        recovery = store.recover_orphaned_with_quota(
+            owner_runtime_id=owner_runtime_id,
+            limit=limit,
+        )
+        batch_count += 1
+        recovered_count += recovery.recovered_count
+        released_count += recovery.released_count
+        settled_count += recovery.settled_count
+        if recovery.recovered_count < limit:
+            break
+    legacy_recovered_count = _recover_legacy_stream_orphans(
+        store=store,
+        owner_runtime_id=owner_runtime_id,
+        limit=limit,
+    )
+    if recovered_count or legacy_recovered_count:
+        app_logger.record(
+            AppLogRecord(
+                event_name="usage_quota.recovered_orphaned",
+                level="warning",
+                request_id=None,
+                turn_id=None,
+                session_id=None,
+                user_id=None,
+                character_id=None,
+                error_code=None,
+                payload={
+                    "recovered_count": recovered_count,
+                    "released_count": released_count,
+                    "settled_count": settled_count,
+                    "legacy_recovered_count": legacy_recovered_count,
+                    "batch_count": batch_count,
+                },
+            )
+        )
+
+
+def _recover_legacy_stream_orphans(
+    *,
+    store: StoreFacade,
+    owner_runtime_id: str,
+    limit: int,
+) -> int:
+    recovered_count = 0
+    while True:
+        batch_count = store.fail_orphan_if_owned_by_other_runtime(
+            owner_runtime_id=owner_runtime_id,
+            limit=limit,
+        )
+        recovered_count += batch_count
+        if batch_count < limit:
+            return recovered_count
 
 
 def _build_models(

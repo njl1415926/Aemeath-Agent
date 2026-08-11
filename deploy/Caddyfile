@@ -8,12 +8,52 @@
 
 {$AEMEATH_DOMAIN} {
 	route {
-		request_body {
-			max_size 128KiB
+		header {
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+			Referrer-Policy "no-referrer"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "DENY"
+			Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		}
 
-		# As the first hop, Caddy's default reverse_proxy behavior ignores
-		# untrusted inbound X-Forwarded-* values and regenerates them.
-		reverse_proxy {$AEMEATH_API_UPSTREAM:api:8000}
+		@sync_chat {
+			method POST
+			path /v1/chat
+		}
+		respond @sync_chat 404
+
+		@api path /v1 /v1/*
+		handle @api {
+			request_body {
+				max_size 128KiB
+			}
+			header Cache-Control "no-store"
+			# As the first hop, Caddy's default reverse_proxy behavior ignores
+			# untrusted inbound X-Forwarded-* values and regenerates them.
+			reverse_proxy {$AEMEATH_API_UPSTREAM:api:8000}
+		}
+
+		@health path /health /ready
+		handle @health {
+			header Cache-Control "no-store"
+			reverse_proxy {$AEMEATH_API_UPSTREAM:api:8000}
+		}
+
+		@assets path /assets/*
+		handle @assets {
+			root * /srv/aemeath-web
+			header Cache-Control "public, max-age=31536000, immutable"
+			file_server
+		}
+
+		@spa method GET HEAD
+		handle @spa {
+			root * /srv/aemeath-web
+			try_files {path} /index.html
+			header Cache-Control "no-cache"
+			file_server
+		}
+
+		respond 404
 	}
 }

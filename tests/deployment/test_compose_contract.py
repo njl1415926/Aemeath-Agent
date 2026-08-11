@@ -63,18 +63,25 @@ def test_compose_security_network_and_logging_contract():
             "options": {"max-size": "10m", "max-file": "5"},
         }
     assert services["api"]["user"] == "10001:10001"
+    assert services["api"]["environment"]["AEMEATH_API_AUTH_MODE"] == "web_session"
+    assert services["api"]["environment"]["AEMEATH_WEB_AUTH_CSRF_KEY_FILE"] == (
+        "/run/secrets/web_auth_csrf_key"
+    )
+    assert "AEMEATH_DEV_AUTH_TOKEN_FILE" not in services["api"]["environment"]
     assert services["proxy"]["user"] == "10002:10002"
     assert services["proxy"]["image"] == "aemeath-caddy:2.10.2-nonroot"
     assert services["proxy"]["build"] == {
-        "context": "./deploy",
-        "dockerfile": "Caddy.Dockerfile",
+        "context": ".",
+        "dockerfile": "deploy/Caddy.Dockerfile",
     }
     caddy_dockerfile = CADDY_DOCKERFILE_PATH.read_text(encoding="utf-8")
     assert f"FROM {caddy_base_image}" in caddy_dockerfile
     assert "setcap -r /usr/bin/caddy" in caddy_dockerfile
     assert "chown -R 10002:10002 /data /config" in caddy_dockerfile
     assert caddy_dockerfile.rstrip().endswith("USER 10002:10002")
-    assert CADDY_CONTEXT_IGNORE_PATH.read_text(encoding="utf-8") == "**\n"
+    assert "COPY --chown=10002:10002 web/dist /srv/aemeath-web" in caddy_dockerfile
+    caddy_ignore = CADDY_CONTEXT_IGNORE_PATH.read_text(encoding="utf-8")
+    assert "!web/dist/**" in caddy_ignore
     assert services["proxy"]["networks"] == {"frontend": {"ipv4_address": "172.30.0.10"}}
     assert document["networks"]["frontend"]["ipam"]["config"] == [
         {"subnet": "172.30.0.0/24"}
@@ -115,8 +122,7 @@ def test_compose_volume_and_secret_scope_is_least_privilege():
             "target": "/var/log/aemeath",
         },
     }
-    assert set(proxy_volumes) == {"/etc/caddy/Caddyfile", "/data", "/config"}
-    assert proxy_volumes["/etc/caddy/Caddyfile"]["read_only"] is True
+    assert set(proxy_volumes) == {"/data", "/config"}
     assert ops_volumes["/var/lib/aemeath/data"]["read_only"] is True
     assert ops_volumes["/var/log/aemeath"]["read_only"] is True
     assert "read_only" not in ops_volumes["/var/lib/aemeath/rag_indexes"]
@@ -127,11 +133,11 @@ def test_compose_volume_and_secret_scope_is_least_privilege():
 
     assert services["api"]["secrets"] == [
         {"source": "deepseek_api_key", "target": "deepseek_api_key"},
-        {"source": "api_bearer_token", "target": "api_bearer_token"},
+        {"source": "web_auth_csrf_key", "target": "web_auth_csrf_key"},
     ]
     assert document["secrets"] == {
         "deepseek_api_key": {"file": "/etc/aemeath/secrets/deepseek_api_key"},
-        "api_bearer_token": {"file": "/etc/aemeath/secrets/api_bearer_token"},
+        "web_auth_csrf_key": {"file": "/etc/aemeath/secrets/web_auth_csrf_key"},
     }
     services_without_secrets = {"proxy", "memory-worker", "ops", "restore"}
     assert all("secrets" not in services[name] for name in services_without_secrets)
@@ -202,6 +208,12 @@ def test_production_env_template_is_tracked_release_asset():
     assert "AEMEATH_DEPLOY_LOCK_SHA256=" in template
     assert "AEMEATH_COMPOSE_CONFIG_SHA256=" in template
     assert "AEMEATH_BUILD_COMMIT=" in template
+    assert "AEMEATH_USAGE_QUOTA_ENABLED=true" in template
+    assert "AEMEATH_USAGE_QUOTA_DAILY_TOKEN_LIMIT=200000" in template
+    assert "AEMEATH_USAGE_QUOTA_ESTIMATOR_VERSION=prompt_utf8_v0_1" in template
+    assert "AEMEATH_API_AUTH_MODE=web_session" in template
+    assert "AEMEATH_WEB_AUTH_CSRF_KEY_FILE=/run/secrets/web_auth_csrf_key" in template
+    assert "AEMEATH_DEV_AUTH_TOKEN_FILE" not in template
     assert "DEEPSEEK_API_KEY=" not in template
 
 

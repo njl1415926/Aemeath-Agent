@@ -280,8 +280,8 @@ Roles are carried in `UserContext` for future use but are not a full RBAC model 
 
 ## Invitation-only Web MVP Interfaces
 
-Status: **Browser Auth/invitations and streaming v0.1 implemented; Session API completion and the
-production frontend remain planned.**
+Status: **Browser Auth/invitations, streaming, Session API, and the local React/Vite Web MVP are
+implemented. Production static hosting and Web-profile activation remain gated.**
 
 Canonical contract: `docs/web_mvp_contract.md`.
 
@@ -365,6 +365,13 @@ same `DialogueAdmissionPort` instance as sync and streaming chat, keyed by `(use
 Archived history is readable by its owner, while archived mutation and chat remain rejected.
 Browser Auth production activation remains gated by the later Web security and deployment acceptance
 tasks.
+
+The browser adapter is implemented in `web/`. It consumes only the public `/v1/*` contracts, keeps
+the HttpOnly Session Cookie outside JavaScript, holds CSRF state in memory, and parses the stable SSE
+event sequence through a provider-neutral client adapter. Character display text and temporary image
+paths are isolated in `web/src/config/character.ts`; visual replacement does not change Auth,
+Session, or streaming interfaces. Unified authentication-expiry redirection, older-history UI
+pagination, Caddy SPA hosting, and authenticated browser E2E remain production follow-ups.
 
 ## Core Turn Contract
 

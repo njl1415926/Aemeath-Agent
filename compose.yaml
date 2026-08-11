@@ -31,8 +31,10 @@ services:
     environment:
       AEMEATH_ENVIRONMENT: prod
       AEMEATH_TRUSTED_PROXY_IPS: 172.30.0.10
+      AEMEATH_API_AUTH_MODE: web_session
+      AEMEATH_WEB_PUBLIC_ORIGIN: https://${AEMEATH_DOMAIN:?set AEMEATH_DOMAIN through the approved non-secret env file}
       DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
-      AEMEATH_DEV_AUTH_TOKEN_FILE: /run/secrets/api_bearer_token
+      AEMEATH_WEB_AUTH_CSRF_KEY_FILE: /run/secrets/web_auth_csrf_key
     expose:
       - "8000"
     volumes:
@@ -45,8 +47,8 @@ services:
     secrets:
       - source: deepseek_api_key
         target: deepseek_api_key
-      - source: api_bearer_token
-        target: api_bearer_token
+      - source: web_auth_csrf_key
+        target: web_auth_csrf_key
     networks:
       - frontend
     restart: unless-stopped
@@ -68,8 +70,8 @@ services:
   proxy:
     image: aemeath-caddy:2.10.2-nonroot
     build:
-      context: ./deploy
-      dockerfile: Caddy.Dockerfile
+      context: .
+      dockerfile: deploy/Caddy.Dockerfile
     platform: linux/amd64
     user: "10002:10002"
     read_only: true
@@ -93,10 +95,6 @@ services:
         published: "443"
         protocol: tcp
     volumes:
-      - type: bind
-        source: ./deploy/Caddyfile
-        target: /etc/caddy/Caddyfile
-        read_only: true
       - type: volume
         source: caddy_data
         target: /data
@@ -217,5 +215,5 @@ volumes:
 secrets:
   deepseek_api_key:
     file: /etc/aemeath/secrets/deepseek_api_key
-  api_bearer_token:
-    file: /etc/aemeath/secrets/api_bearer_token
+  web_auth_csrf_key:
+    file: /etc/aemeath/secrets/web_auth_csrf_key

@@ -24,7 +24,7 @@ class _StreamingBackend(BaseHTTPRequestHandler):
     disconnect_seen = threading.Event()
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path == "/stream":
+        if self.path == "/v1/stream":
             self._read_body()
             self._start_stream()
             self._write_chunk(b'event: response.delta\ndata: {"delta":"first"}\n\n')
@@ -36,7 +36,7 @@ class _StreamingBackend(BaseHTTPRequestHandler):
             self.terminal_written.set()
             self._finish_chunks()
             return
-        if self.path == "/disconnect":
+        if self.path == "/v1/disconnect":
             self._read_body()
             self._start_stream()
             self._write_chunk(b'event: response.delta\ndata: {"delta":"first"}\n\n')
@@ -122,7 +122,7 @@ def _wait_until_ready(*, process: subprocess.Popen[bytes], port: int) -> None:
     last_error_type: str | None = None
     while True:
         try:
-            last_status = _post(port, "/ready-probe", b"")[0]
+            last_status = _post(port, "/health", b"")[0]
             if last_status == 204:
                 return
         except OSError as exc:
@@ -182,11 +182,11 @@ def test_caddy_sse_flush_heartbeat_disconnect_protocols_and_body_limit(
         _wait_until_ready(process=process, port=proxy_port)
         assert _selected_alpn(proxy_port, "http/1.1") == "http/1.1"
         assert _selected_alpn(proxy_port, "h2") == "h2"
-        assert _post(proxy_port, "/body", b"x" * RAW_BODY_LIMIT)[0] == 204
-        assert _post(proxy_port, "/body", b"x" * (RAW_BODY_LIMIT + 1))[0] == 413
+        assert _post(proxy_port, "/v1/body", b"x" * RAW_BODY_LIMIT)[0] == 204
+        assert _post(proxy_port, "/v1/body", b"x" * (RAW_BODY_LIMIT + 1))[0] == 413
 
         stream_connection = _connection(proxy_port)
-        stream_connection.request("POST", "/stream", body=b"{}")
+        stream_connection.request("POST", "/v1/stream", body=b"{}")
         stream_response = stream_connection.getresponse()
         first_frame = b"".join(stream_response.readline() for _index in range(3))
         assert stream_response.status == 200
@@ -205,7 +205,7 @@ def test_caddy_sse_flush_heartbeat_disconnect_protocols_and_body_limit(
         with httpx.Client(http2=True, verify=False, timeout=5, trust_env=False) as client:
             with client.stream(
                 "POST",
-                f"https://localhost:{proxy_port}/stream",
+                f"https://localhost:{proxy_port}/v1/stream",
                 content=b"{}",
             ) as h2_response:
                 h2_lines = h2_response.iter_lines()
@@ -220,7 +220,7 @@ def test_caddy_sse_flush_heartbeat_disconnect_protocols_and_body_limit(
                 assert "event: turn.completed" in remaining_h2
 
         disconnect_connection = _connection(proxy_port)
-        disconnect_connection.request("POST", "/disconnect", body=b"{}")
+        disconnect_connection.request("POST", "/v1/disconnect", body=b"{}")
         disconnect_response = disconnect_connection.getresponse()
         assert b"event: response.delta" in b"".join(
             disconnect_response.readline() for _index in range(3)

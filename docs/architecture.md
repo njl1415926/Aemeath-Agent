@@ -35,9 +35,9 @@ app-log behavior at the HTTP adapter boundary.
 ## 2026-08-04 Invitation-only Web MVP Target
 
 The Manager-frozen Web target is documented in `docs/web_mvp_contract.md`. Browser Auth and
-invitation runtime support is implemented under T-0142, the streaming runtime/API under T-0143, and
-the Web Session API under T-0144. The frontend and production Web-profile activation remain gated
-work:
+invitation runtime support is implemented under T-0142, the streaming runtime/API under T-0143, the
+Web Session API under T-0144, and the local React/Vite frontend under T-0145. Production static
+hosting and Web-profile activation remain gated work:
 
 ```text
 Browser
@@ -58,14 +58,14 @@ from dialogue Sessions and do not own conversation lifecycle or history.
 
 Streaming is a Service/API capability with domain events. HTTP, SSE, Cookie, and CSRF types remain
 outside `DialogueController`, Character, Memory, RAG, Prompt, State, and model provider ports. The
-synchronous `AgentService` path remains compatible while the future Web frontend can use the
-implemented streaming path. Caddy serves static assets and API from one HTTPS origin, so production
-CORS remains empty and the final image does not run Node.js.
+synchronous `AgentService` path remains compatible while the Web frontend uses the implemented
+streaming path. The production target has Caddy serve static assets and API from one HTTPS origin,
+so production CORS remains empty and the final runtime image does not run Node.js.
 
-Implementation is split into T-0142 through T-0146. T-0142 through T-0144 are accepted; D6 backup may
-proceed against the frozen Auth, streaming, and Session persistence schemas. T-0145 and T-0146 remain
-the frontend, security/quota, and browser E2E work. D7 must observe final Web events, and D8 remains
-the real-cloud acceptance gate.
+Implementation is split into T-0142 through T-0146. T-0142 through T-0145 are accepted; D6 backup may
+proceed against the frozen Auth, streaming, and Session persistence schemas. T-0146 retains
+production static hosting, unified authentication-expiry handling, security/quota, and browser E2E
+work. D7 must observe final Web events, and D8 remains the real-cloud acceptance gate.
 
 ## 2026-08-07 Web Session API v0.1
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,7 @@ from app.errors import AemeathError, ErrorCode
 from app.main import build_application_runtime
 from app.model.mock_streaming import MockStreamingChatModelClient
 from app.model.streaming import ModelStreamFinished, ModelStreamRequest, ModelTextDelta
+from app.quota.schemas import UsageQueryRequest
 from app.runtime.guardrails.errors import RuntimeBusyError
 from app.services.agent_stream_service import (
     RefCountedStreamKeyRegistry,
@@ -180,6 +182,45 @@ def _run_handle(handle) -> list[Any]:
     return [handle.started_event, *sink.events]
 
 
+def _quota_runtime(settings, **overrides):
+    values = {
+        "runtime_session_wait_timeout_seconds": 0.05,
+        "deepseek_read_timeout_seconds": 0.2,
+        "usage_quota_enabled": True,
+        "usage_quota_daily_turn_limit": 5,
+        "usage_quota_daily_token_limit": 50_000,
+        "usage_quota_retry_after_seconds": 7,
+    }
+    values.update(overrides)
+    configured = replace(settings, **values)
+    return build_application_runtime(settings=configured, surface="api")
+
+
+def _quota_reservation_row(runtime, *, turn_id: str):
+    with sqlite3.connect(runtime.settings.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            "SELECT * FROM usage_quota_reservations WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+
+
+def _stream_row(runtime, *, turn_id: str):
+    with sqlite3.connect(runtime.settings.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            "SELECT * FROM chat_request_idempotency WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+
+
+def _quota_reservation_count(runtime) -> int:
+    with sqlite3.connect(runtime.settings.db_path) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM usage_quota_reservations"
+        ).fetchone()[0]
+
+
 def _context(runtime, request_id: str) -> UserContext:
     return UserContext(user_id=runtime.settings.default_user_id, request_id=request_id)
 
@@ -227,6 +268,329 @@ def test_fingerprint_v1_golden_vectors_and_key_order() -> None:
         message="m",
         metadata={"value": -0.0},
     ) == "d61b79969a0a25c7a5c79732164b6ab31a89443387697f3f9e6c448ef8806b75"
+
+
+def test_quota_enabled_stream_settles_after_provider_started(settings) -> None:
+    runtime = _quota_runtime(settings)
+    try:
+        service = runtime.agent_stream_service
+        assert service is not None
+        session, request = _session_request(runtime, key="cm-quota-success")
+
+        events = _run_handle(
+            service.stream_chat(user_context=_context(runtime, "req_quota"), request=request)
+        )
+
+        assert [event.event_type for event in events] == [
+            "turn.started",
+            "response.delta",
+            "turn.completed",
+        ]
+        row = _quota_reservation_row(runtime, turn_id=events[-1].turn_id)
+        assert row is not None
+        assert row["status"] == "settled"
+        assert row["charging_phase"] == "terminalized"
+        assert row["provider_started_at"] is not None
+        assert row["prompt_messages_utf8_bytes"] > 0
+        assert row["output_utf8_bytes"] > 0
+        summary = runtime.store.get_daily_usage(
+            request=UsageQueryRequest(
+                user_id=runtime.settings.default_user_id,
+                quota_day=row["quota_day"],
+            )
+        )
+        assert summary is not None
+        assert summary.reserved_turns == 0
+        assert summary.settled_turns == 1
+    finally:
+        runtime.close()
+
+
+def test_quota_prompt_adjustment_releases_before_provider_open(settings) -> None:
+    runtime = _quota_runtime(
+        settings,
+        context_budget_max_chars=1,
+        deepseek_max_output_tokens=1,
+        usage_quota_daily_token_limit=10,
+    )
+    try:
+        service = runtime.agent_stream_service
+        assert service is not None
+        model = service.model_client.delegate
+        session, request = _session_request(runtime, key="cm-quota-prompt-reject")
+
+        events = _run_handle(
+            service.stream_chat(user_context=_context(runtime, "req_quota_reject"), request=request)
+        )
+
+        assert model.open_count == 0
+        assert isinstance(events[-1], TurnFailed)
+        assert events[-1].error.code == ErrorCode.USAGE_QUOTA_EXCEEDED.value
+        row = _quota_reservation_row(runtime, turn_id=events[-1].turn_id)
+        assert row is not None
+        assert row["status"] == "released"
+        assert row["charging_phase"] == "terminalized"
+        assert row["provider_started_at"] is None
+        assert row["terminal_reason"] == "quota_rejected_after_prepare"
+    finally:
+        runtime.close()
+
+
+def test_quota_provider_failure_settles_after_provider_started(settings) -> None:
+    runtime = _quota_runtime(settings)
+    try:
+        service = runtime.agent_stream_service
+        assert service is not None
+        service.model_client = MockStreamingChatModelClient(
+            failure=AemeathError(
+                code=ErrorCode.MODEL_UNAVAILABLE,
+                public_message="The model service is temporarily unavailable.",
+                internal_message="safe test failure",
+                retryable=True,
+            ),
+            fail_after_events=0,
+        )
+        session, request = _session_request(runtime, key="cm-quota-provider-fail")
+
+        events = _run_handle(
+            service.stream_chat(
+                user_context=_context(runtime, "req_provider_fail"),
+                request=request,
+            )
+        )
+
+        assert isinstance(events[-1], TurnFailed)
+        assert events[-1].error.code == ErrorCode.MODEL_UNAVAILABLE.value
+        row = _quota_reservation_row(runtime, turn_id=events[-1].turn_id)
+        assert row is not None
+        assert row["status"] == "settled"
+        assert row["charging_phase"] == "terminalized"
+        assert row["provider_started_at"] is not None
+        assert row["terminal_reason"] == "model_failed"
+    finally:
+        runtime.close()
+
+
+def test_quota_pre_provider_cancel_releases(settings) -> None:
+    runtime = _quota_runtime(settings)
+    try:
+        service = runtime.agent_stream_service
+        assert service is not None
+        session, request = _session_request(runtime, key="cm-quota-pre-cancel")
+        handle = service.stream_chat(
+            user_context=_context(runtime, "req_pre_cancel"),
+            request=request,
+        )
+        handle.cancel(reason="user_cancelled")
+
+        events = _run_handle(handle)
+
+        assert isinstance(events[-1], TurnFailed)
+        assert events[-1].error.code == ErrorCode.CHAT_STREAM_CANCELLED.value
+        row = _quota_reservation_row(runtime, turn_id=events[-1].turn_id)
+        assert row is not None
+        assert row["status"] == "released"
+        assert row["charging_phase"] == "terminalized"
+        assert row["provider_started_at"] is None
+        assert row["terminal_reason"] == "user_cancelled"
+        assert service.model_client.delegate.open_count == 0
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("reason", ["user_cancelled", "client_disconnected"])
+def test_quota_post_provider_cancel_or_disconnect_settles(settings, reason) -> None:
+    runtime = _quota_runtime(settings)
+    try:
+        service = runtime.agent_stream_service
+        assert service is not None
+        blocking = _BlockingStreamingClient()
+        service.model_client = blocking
+        session, request = _session_request(runtime, key=f"cm-quota-{reason}")
+        handle = service.stream_chat(
+            user_context=_context(runtime, f"req_{reason}"),
+            request=request,
+        )
+        sink = _RecordingSink()
+
+        handle.start(sink=sink)
+        assert blocking.session.entered.wait(timeout=3)
+        handle.cancel(reason=reason)
+        assert sink.closed.wait(timeout=3)
+        handle.close()
+        events = [handle.started_event, *sink.events]
+
+        assert isinstance(events[-1], TurnFailed)
+        row = _quota_reservation_row(runtime, turn_id=events[-1].turn_id)
+        assert row is not None
+        assert row["status"] == "settled"
+        assert row["charging_phase"] == "terminalized"
+        assert row["provider_started_at"] is not None
+        assert row["terminal_reason"] == reason
+        assert blocking.open_count == 1
+    finally:
+        runtime.close()
+
+
+def test_quota_durable_completion_late_cancel_preserves_first_wins(settings) -> None:
+    runtime = _quota_runtime(settings)
+    try:
+        service = runtime.agent_stream_service
+        assert service is not None
+        session, request = _session_request(runtime, key="cm-quota-late-cancel")
+        handle = service.stream_chat(user_context=_context(runtime, "req_late"), request=request)
+        events = _run_handle(handle)
+        assert isinstance(events[-1], TurnCompleted)
+
+        handle.cancel(reason="user_cancelled")
+        handle.close()
+
+        stream = _stream_row(runtime, turn_id=events[-1].turn_id)
+        quota = _quota_reservation_row(runtime, turn_id=events[-1].turn_id)
+        assert stream["status"] == "completed"
+        assert stream["terminal_reason"] is None
+        assert quota["status"] == "settled"
+        assert quota["terminal_reason"] is None
+        replay = service.stream_chat(user_context=_context(runtime, "req_replay"), request=request)
+        assert isinstance(_run_handle(replay)[-1], TurnCompleted)
+    finally:
+        runtime.close()
+
+
+def test_quota_startup_recovers_orphans_across_multiple_batches(settings) -> None:
+    old_runtime = _quota_runtime(
+        settings,
+        stream_orphan_recovery_limit=1,
+        usage_quota_daily_token_limit=100_000,
+    )
+    new_runtime = None
+    try:
+        old_service = old_runtime.agent_stream_service
+        assert old_service is not None
+        requests = []
+        for index in range(2):
+            session, request = _session_request(old_runtime, key=f"cm-quota-orphan-{index}")
+            old_service.stream_chat(
+                user_context=_context(old_runtime, f"req_old_{index}"),
+                request=request,
+            )
+            requests.append(request)
+
+        new_runtime = _quota_runtime(
+            settings,
+            stream_orphan_recovery_limit=1,
+            usage_quota_daily_token_limit=100_000,
+        )
+        new_service = new_runtime.agent_stream_service
+        assert new_service is not None
+
+        for request in requests:
+            events = _run_handle(
+                new_service.stream_chat(
+                    user_context=_context(new_runtime, f"req_recover_{request.client_message_id}"),
+                    request=request,
+                )
+            )
+            assert isinstance(events[-1], TurnFailed)
+            row = _quota_reservation_row(new_runtime, turn_id=events[-1].turn_id)
+            assert row["status"] == "released"
+            assert row["terminal_reason"] == "runtime_orphaned_pre_provider"
+    finally:
+        if new_runtime is not None:
+            new_runtime.close()
+        old_runtime.close()
+
+
+def test_quota_startup_recovers_legacy_in_progress_without_reservation(settings) -> None:
+    old_runtime = build_application_runtime(
+        settings=replace(
+            settings,
+            runtime_session_wait_timeout_seconds=0.05,
+            deepseek_read_timeout_seconds=0.2,
+            stream_orphan_recovery_limit=1,
+            usage_quota_enabled=False,
+        ),
+        surface="api",
+    )
+    new_runtime = None
+    try:
+        old_service = old_runtime.agent_stream_service
+        assert old_service is not None
+        session, request = _session_request(old_runtime, key="cm-legacy-orphan")
+        old_runtime.store.resolve_or_reserve(
+            request=StreamTurnResolveOrReserve(
+                user_id=old_runtime.settings.default_user_id,
+                session_id=session.id,
+                active_character_id="aemeath",
+                client_message_id=request.client_message_id,
+                request_fingerprint_version=1,
+                request_fingerprint=fingerprint_chat_request_v1(
+                    character_id=request.character_id,
+                    message=request.message,
+                    metadata=request.metadata,
+                ),
+                owner_runtime_id=old_service.owner_runtime_id,
+                turn_id=new_id("turn"),
+                user_message_id=new_id("message"),
+                user_message_content=request.message,
+            )
+        )
+
+        new_runtime = _quota_runtime(settings, stream_orphan_recovery_limit=1)
+        new_service = new_runtime.agent_stream_service
+        assert new_service is not None
+        events = _run_handle(
+            new_service.stream_chat(
+                user_context=_context(new_runtime, "req_legacy_replay"),
+                request=request,
+            )
+        )
+
+        assert isinstance(events[-1], TurnFailed)
+        assert _stream_row(new_runtime, turn_id=events[-1].turn_id)["terminal_reason"] == (
+            "runtime_orphaned"
+        )
+        assert _quota_reservation_count(new_runtime) == 0
+    finally:
+        if new_runtime is not None:
+            new_runtime.close()
+        old_runtime.close()
+
+
+def test_quota_preflight_failure_logs_released_terminal(settings) -> None:
+    runtime = _quota_runtime(settings)
+    try:
+        service = runtime.agent_stream_service
+        assert service is not None
+        logger = _CaptureLogger()
+        service.app_logger = logger
+        session, request = _session_request(runtime, key="cm-quota-preflight-log")
+
+        def _fail_preflight(**kwargs):
+            del kwargs
+            raise AemeathError(
+                code=ErrorCode.SESSION_ARCHIVED,
+                public_message="Session is archived and cannot be used.",
+                internal_message="forced_preflight_failure",
+                retryable=False,
+            )
+
+        service.turn_engine.preflight = _fail_preflight
+
+        with pytest.raises(AemeathError) as raised:
+            service.stream_chat(
+                user_context=_context(runtime, "req_preflight_log"),
+                request=request,
+            )
+        assert raised.value.code == ErrorCode.SESSION_ARCHIVED
+
+        assert any(
+            record.event_name == "usage_quota.released"
+            and record.error_code == ErrorCode.SESSION_ARCHIVED.value
+            for record in logger.records
+        )
+    finally:
+        runtime.close()
 
 
 def test_request_id_does_not_change_fingerprint_and_business_change_conflicts(

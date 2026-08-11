@@ -207,6 +207,14 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Frontend build and package-manager state
+web/node_modules/
+web/dist/
+web/.vite/
+web/.npm-cache/
+web/coverage/
+web/reference-assets/
+
 # Aemeath runtime data
 .aemeath/
 data/*.db

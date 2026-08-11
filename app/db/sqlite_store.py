@@ -21,6 +21,7 @@ from app.db.sqlite_index_contract import (
     ACTIVE_MEMORY_IDENTITY_INDEX,
     has_valid_active_memory_identity_index,
 )
+from app.db.stream_quota import StreamQuotaSQLiteUow
 from app.db.stream_turns import (
     StreamRequestRecord,
     StreamTurnComplete,
@@ -37,6 +38,12 @@ from app.db.streaming_chat_migrations import (
     STREAMING_CHAT_IDEMPOTENCY_MIGRATION_IDS,
     STREAMING_CHAT_IDEMPOTENCY_TABLE,
     ensure_streaming_chat_schema,
+)
+from app.db.usage_quota_migrations import (
+    USAGE_QUOTA_DAILY_TABLE,
+    USAGE_QUOTA_MIGRATION_ID,
+    USAGE_QUOTA_RESERVATIONS_TABLE,
+    ensure_usage_quota_schema,
 )
 from app.embeddings.artifacts import (
     EmbeddingArtifactDiagnostics,
@@ -67,6 +74,18 @@ from app.memory.schemas import (
     MemoryExtractionJobRecord,
     MemoryJobEnqueueResult,
     MemoryVectorSearchResult,
+)
+from app.quota.schemas import (
+    StreamQuotaComplete,
+    StreamQuotaFail,
+    StreamQuotaProviderStarted,
+    StreamQuotaRecoveryResult,
+    StreamQuotaReservationRecord,
+    StreamQuotaResolveOrReserve,
+    StreamQuotaResolveOutcome,
+    StreamQuotaTerminalRecord,
+    UsageDailySummary,
+    UsageQueryRequest,
 )
 from app.schemas import MemoryRecord, MessageRecord, RelationshipState
 from app.session.errors import (
@@ -100,6 +119,7 @@ class SQLiteStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
         self.browser_auth = BrowserAuthRepository(db_path=db_path, backend="sqlite_raw")
+        self._stream_quota_uow = StreamQuotaSQLiteUow(db_path)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -112,6 +132,7 @@ class SQLiteStore:
 
     def _init_db(self) -> None:
         self._preflight_streaming_chat_schema()
+        self._preflight_usage_quota_schema()
         schema_path = Path(__file__).with_name("schema.sql")
         schema_sql = schema_path.read_text(encoding="utf-8")
         with self._connect() as conn:
@@ -126,6 +147,7 @@ class SQLiteStore:
             self._migrate_memory_embedding_artifacts(conn)
         ensure_browser_auth_schema(self.db_path)
         ensure_streaming_chat_schema(self.db_path)
+        ensure_usage_quota_schema(self.db_path)
 
     def _preflight_streaming_chat_schema(self) -> None:
         """Reject marked drift before schema.sql can create a missing object."""
@@ -154,6 +176,34 @@ class SQLiteStore:
             ensure_streaming_chat_schema(self.db_path)
         elif marker is not None:
             raise StorageMigrationRequiredError(reason="streaming_chat_table_missing")
+
+    def _preflight_usage_quota_schema(self) -> None:
+        """Reject marked quota drift before startup can create missing objects."""
+
+        with self._connect() as conn:
+            migration_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            ).fetchone()
+            marker = (
+                conn.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?",
+                    (USAGE_QUOTA_MIGRATION_ID,),
+                ).fetchone()
+                if migration_table is not None
+                else None
+            )
+            daily_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (USAGE_QUOTA_DAILY_TABLE,),
+            ).fetchone()
+            reservation_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (USAGE_QUOTA_RESERVATIONS_TABLE,),
+            ).fetchone()
+        if marker is not None and (daily_table is None or reservation_table is None):
+            raise StorageMigrationRequiredError(reason="usage_quota_table_missing")
+        if daily_table is not None or reservation_table is not None:
+            ensure_usage_quota_schema(self.db_path)
 
     def _has_valid_active_memory_identity_index(self, conn: sqlite3.Connection) -> bool:
         index_list_rows = conn.execute(
@@ -2859,6 +2909,48 @@ class SQLiteStore:
             raise
         finally:
             conn.close()
+
+    def get_daily_usage(self, *, request: UsageQueryRequest) -> UsageDailySummary | None:
+        return self._stream_quota_uow.get_daily_usage(request=request)
+
+    def resolve_or_reserve_with_quota(
+        self,
+        *,
+        request: StreamQuotaResolveOrReserve,
+    ) -> StreamQuotaResolveOutcome:
+        return self._stream_quota_uow.resolve_or_reserve_with_quota(request=request)
+
+    def mark_provider_started_with_quota(
+        self,
+        *,
+        request: StreamQuotaProviderStarted,
+    ) -> StreamQuotaReservationRecord:
+        return self._stream_quota_uow.mark_provider_started_with_quota(request=request)
+
+    def complete_with_quota(
+        self,
+        *,
+        request: StreamQuotaComplete,
+    ) -> StreamQuotaTerminalRecord:
+        return self._stream_quota_uow.complete_with_quota(request=request)
+
+    def fail_with_quota(
+        self,
+        *,
+        request: StreamQuotaFail,
+    ) -> StreamQuotaTerminalRecord:
+        return self._stream_quota_uow.fail_with_quota(request=request)
+
+    def recover_orphaned_with_quota(
+        self,
+        *,
+        owner_runtime_id: str,
+        limit: int = 100,
+    ) -> StreamQuotaRecoveryResult:
+        return self._stream_quota_uow.recover_orphaned_with_quota(
+            owner_runtime_id=owner_runtime_id,
+            limit=limit,
+        )
 
     def _stream_reserve(
         self,

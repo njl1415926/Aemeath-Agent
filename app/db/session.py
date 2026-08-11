@@ -18,6 +18,12 @@ from app.db.streaming_chat_migrations import (
     STREAMING_CHAT_IDEMPOTENCY_TABLE,
     ensure_streaming_chat_schema,
 )
+from app.db.usage_quota_migrations import (
+    USAGE_QUOTA_DAILY_TABLE,
+    USAGE_QUOTA_MIGRATION_ID,
+    USAGE_QUOTA_RESERVATIONS_TABLE,
+    ensure_usage_quota_schema,
+)
 
 _MEMORY_ARTIFACT_TABLE = "long_term_memory_embedding_artifacts"
 _MEMORY_ARTIFACT_REQUIRED_COLUMNS = {
@@ -101,6 +107,12 @@ def initialize_database(engine: Engine, *, db_path: Path) -> None:
             raise StorageMigrationRequiredError(
                 reason="streaming_chat_table_missing"
             )
+    if USAGE_QUOTA_MIGRATION_ID in _schema_markers(engine):
+        if (
+            USAGE_QUOTA_DAILY_TABLE not in table_names
+            or USAGE_QUOTA_RESERVATIONS_TABLE not in table_names
+        ):
+            raise StorageMigrationRequiredError(reason="usage_quota_table_missing")
     if (
         "long_term_memory_embeddings" in table_names
         and _MEMORY_ARTIFACT_TABLE not in table_names
@@ -144,7 +156,17 @@ def initialize_database(engine: Engine, *, db_path: Path) -> None:
     if "accounts" not in table_names:
         ensure_browser_auth_schema(db_path)
     ensure_streaming_chat_schema(db_path)
+    ensure_usage_quota_schema(db_path)
     if not _has_valid_active_memory_identity_index(engine):
         raise StorageMigrationRequiredError(
             reason="sqlalchemy_active_memory_identity_index_invalid"
         )
+
+
+def _schema_markers(engine: Engine) -> set[str]:
+    inspector = inspect(engine)
+    if "schema_migrations" not in set(inspector.get_table_names()):
+        return set()
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql("SELECT version FROM schema_migrations").all()
+    return {str(row[0]) for row in rows}

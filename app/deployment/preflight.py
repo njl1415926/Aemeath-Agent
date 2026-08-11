@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import Settings
-from app.deployment.secrets import API_BEARER_SECRET_PATH, DEEPSEEK_SECRET_PATH
+from app.deployment.secrets import (
+    API_BEARER_SECRET_PATH,
+    DEEPSEEK_SECRET_PATH,
+    WEB_AUTH_CSRF_SECRET_PATH,
+)
 from app.deployment.uvicorn_config import validated_trusted_proxy_ips
 
-_PROD_SECRET_FILE_ENV = {
-    "DEEPSEEK_API_KEY_FILE": DEEPSEEK_SECRET_PATH,
-    "AEMEATH_DEV_AUTH_TOKEN_FILE": API_BEARER_SECRET_PATH,
-}
 _FORBIDDEN_SILICONFLOW_SECRET = Path("/run/secrets/siliconflow_api_key")
 
 
@@ -52,7 +52,12 @@ def run_startup_preflight(settings: Settings) -> PreflightReport:
         _require_directory(root, writable=True, name=f"log_root_{index}")
     checks.append("state_volumes")
 
-    for env_name, approved_path in _PROD_SECRET_FILE_ENV.items():
+    secret_files = {"DEEPSEEK_API_KEY_FILE": DEEPSEEK_SECRET_PATH}
+    if settings.api_auth_mode == "web_session":
+        secret_files["AEMEATH_WEB_AUTH_CSRF_KEY_FILE"] = WEB_AUTH_CSRF_SECRET_PATH
+    else:
+        secret_files["AEMEATH_DEV_AUTH_TOKEN_FILE"] = API_BEARER_SECRET_PATH
+    for env_name, approved_path in secret_files.items():
         _require_secret_file(env_name, approved_path=approved_path)
     if "SILICONFLOW_API_KEY" in os.environ or "SILICONFLOW_API_KEY_FILE" in os.environ:
         raise ValueError("SiliconFlow secret configuration is forbidden in API-only prod v0.1.")

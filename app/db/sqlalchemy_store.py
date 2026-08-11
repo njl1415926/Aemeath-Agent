@@ -24,6 +24,7 @@ from app.db.session import (
     create_sqlite_engine,
     initialize_database,
 )
+from app.db.stream_quota import StreamQuotaSQLiteUow
 from app.db.stream_turns import (
     StreamRequestRecord,
     StreamTurnComplete,
@@ -43,6 +44,18 @@ from app.memory.schemas import (
     MemoryJobEnqueueResult,
     MemoryVectorSearchResult,
 )
+from app.quota.schemas import (
+    StreamQuotaComplete,
+    StreamQuotaFail,
+    StreamQuotaProviderStarted,
+    StreamQuotaRecoveryResult,
+    StreamQuotaReservationRecord,
+    StreamQuotaResolveOrReserve,
+    StreamQuotaResolveOutcome,
+    StreamQuotaTerminalRecord,
+    UsageDailySummary,
+    UsageQueryRequest,
+)
 from app.schemas import MemoryRecord, MessageRecord, RelationshipState
 from app.session.schemas import SessionRecord, SessionStatus
 
@@ -60,6 +73,7 @@ class SqlAlchemyStore:
         self.sessions = SessionRepository(self.session_factory)
         self.relationships = RelationshipRepository(self.session_factory)
         self.stream_turns = StreamTurnRepository(self.session_factory)
+        self._stream_quota_uow = StreamQuotaSQLiteUow(db_path)
         self.memories = MemoryRepository(self.session_factory)
         self.memory_jobs = MemoryJobRepository(self.session_factory)
         self.memory_embeddings = MemoryEmbeddingRepository(self.session_factory)
@@ -278,6 +292,48 @@ class SqlAlchemyStore:
         limit: int = 100,
     ) -> int:
         return self.stream_turns.fail_orphan_if_owned_by_other_runtime(
+            owner_runtime_id=owner_runtime_id,
+            limit=limit,
+        )
+
+    def get_daily_usage(self, *, request: UsageQueryRequest) -> UsageDailySummary | None:
+        return self._stream_quota_uow.get_daily_usage(request=request)
+
+    def resolve_or_reserve_with_quota(
+        self,
+        *,
+        request: StreamQuotaResolveOrReserve,
+    ) -> StreamQuotaResolveOutcome:
+        return self._stream_quota_uow.resolve_or_reserve_with_quota(request=request)
+
+    def mark_provider_started_with_quota(
+        self,
+        *,
+        request: StreamQuotaProviderStarted,
+    ) -> StreamQuotaReservationRecord:
+        return self._stream_quota_uow.mark_provider_started_with_quota(request=request)
+
+    def complete_with_quota(
+        self,
+        *,
+        request: StreamQuotaComplete,
+    ) -> StreamQuotaTerminalRecord:
+        return self._stream_quota_uow.complete_with_quota(request=request)
+
+    def fail_with_quota(
+        self,
+        *,
+        request: StreamQuotaFail,
+    ) -> StreamQuotaTerminalRecord:
+        return self._stream_quota_uow.fail_with_quota(request=request)
+
+    def recover_orphaned_with_quota(
+        self,
+        *,
+        owner_runtime_id: str,
+        limit: int = 100,
+    ) -> StreamQuotaRecoveryResult:
+        return self._stream_quota_uow.recover_orphaned_with_quota(
             owner_runtime_id=owner_runtime_id,
             limit=limit,
         )

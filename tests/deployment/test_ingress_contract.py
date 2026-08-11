@@ -64,6 +64,13 @@ def test_caddy_contract_has_exact_raw_limit_and_uses_first_hop_forwarding_defaul
     assert "header_up" not in caddyfile
     assert "flush_interval" not in caddyfile
     assert not re.search(r"(?m)^\s*log\s", caddyfile)
+    assert "path /v1/chat" in caddyfile
+    assert "respond @sync_chat 404" in caddyfile
+    assert "root * /srv/aemeath-web" in caddyfile
+    assert "try_files {path} /index.html" in caddyfile
+    assert 'Content-Security-Policy "default-src \'self\'' in caddyfile
+    assert 'X-Frame-Options "DENY"' in caddyfile
+    assert "Strict-Transport-Security" not in caddyfile
 
 
 def test_deployment_images_are_linux_amd64_digest_pinned_and_non_root():

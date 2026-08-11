@@ -70,7 +70,7 @@ def _request(
             headers["X-Forwarded-For"] = forwarded_for
         connection.request(
             "POST",
-            "/",
+            "/v1/body-limit",
             body=body,
             headers=headers,
             encode_chunked=chunked,

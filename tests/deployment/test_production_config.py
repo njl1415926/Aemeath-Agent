@@ -12,10 +12,13 @@ from app.deployment.secrets import resolve_secret
 def _configure_prod(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
     deepseek_file = tmp_path / "deepseek"
     bearer_file = tmp_path / "bearer"
+    csrf_file = tmp_path / "csrf"
     deepseek_file.write_bytes(b"deepseek-test-marker\n")
     bearer_file.write_bytes(b"bearer-test-marker\r\n")
+    csrf_file.write_bytes(b"csrf-test-marker-with-at-least-32-bytes")
     monkeypatch.setattr("app.config.DEEPSEEK_SECRET_PATH", deepseek_file)
     monkeypatch.setattr("app.config.API_BEARER_SECRET_PATH", bearer_file)
+    monkeypatch.setattr("app.config.WEB_AUTH_CSRF_SECRET_PATH", csrf_file)
     for name in (
         "DEEPSEEK_API_KEY",
         "OPENAI_API_KEY",
@@ -23,6 +26,8 @@ def _configure_prod(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings
         "SILICONFLOW_API_KEY",
         "SILICONFLOW_API_KEY_FILE",
         "AEMEATH_EMBEDDING_PROFILE",
+        "AEMEATH_WEB_AUTH_CSRF_KEY",
+        "AEMEATH_WEB_AUTH_CSRF_KEY_FILE",
     ):
         monkeypatch.delenv(name, raising=False)
     values = {
@@ -53,6 +58,21 @@ def _configure_prod(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
+    settings = Settings.from_env()
+    settings.validate()
+    return settings
+
+
+def _configure_prod_web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
+    settings = _configure_prod(monkeypatch, tmp_path)
+    csrf_file = tmp_path / "csrf"
+    monkeypatch.delenv("AEMEATH_DEV_AUTH_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("AEMEATH_API_AUTH_MODE", "web_session")
+    monkeypatch.setenv("AEMEATH_WEB_PUBLIC_ORIGIN", "https://chat.example.test")
+    monkeypatch.setenv("AEMEATH_WEB_AUTH_CSRF_KEY_FILE", str(csrf_file))
+    monkeypatch.setenv("AEMEATH_USAGE_QUOTA_ENABLED", "true")
+    monkeypatch.setenv("AEMEATH_USAGE_QUOTA_DAILY_TURN_LIMIT", "50")
+    monkeypatch.setenv("AEMEATH_USAGE_QUOTA_DAILY_TOKEN_LIMIT", "200000")
     settings = Settings.from_env()
     settings.validate()
     return settings
@@ -160,6 +180,55 @@ def test_prod_configuration_accepts_only_frozen_api_profile(
     assert settings.api_cors_allowed_origins == ()
     assert "deepseek-test-marker" not in repr(settings)
     assert "bearer-test-marker" not in repr(settings)
+
+
+def test_prod_configuration_accepts_web_session_profile_without_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    settings = _configure_prod_web(monkeypatch, tmp_path)
+
+    assert settings.api_auth_mode == "web_session"
+    assert settings.dev_auth_token is None
+    assert settings.web_auth_csrf_key_from_file is True
+    assert settings.web_public_origin == "https://chat.example.test"
+    assert settings.usage_quota_daily_token_limit == 200_000
+    assert "csrf-test-marker" not in repr(settings)
+
+
+def test_prod_web_session_rejects_dev_bearer_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    settings = _configure_prod_web(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="rejects dev Bearer"):
+        replace(
+            settings,
+            dev_auth_token="forbidden",
+            dev_auth_token_from_file=True,
+        ).validate()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "unsafe_value"),
+    [
+        ("usage_quota_enabled", False),
+        ("usage_quota_daily_turn_limit", 51),
+        ("usage_quota_daily_token_limit", 200_001),
+        ("usage_quota_estimator_version", "other"),
+    ],
+)
+def test_prod_web_session_rejects_unapproved_quota_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field_name: str,
+    unsafe_value: object,
+):
+    settings = _configure_prod_web(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError):
+        replace(settings, **{field_name: unsafe_value}).validate()
 
 
 @pytest.mark.parametrize(

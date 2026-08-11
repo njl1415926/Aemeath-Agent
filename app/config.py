@@ -21,6 +21,12 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_optional_int(value: str | None) -> int | None:
+    if value is None or not value.strip():
+        return None
+    return int(value)
+
+
 def _parse_cors_origins(value: str) -> tuple[str, ...]:
     if not value.strip():
         return ()
@@ -160,6 +166,11 @@ class Settings:
     password_profile: str = "argon2id_owasp_2026_v1"
     password_work_concurrency: int = 1
     password_work_wait_timeout_seconds: float = 1.0
+    usage_quota_enabled: bool = False
+    usage_quota_daily_turn_limit: int = 50
+    usage_quota_daily_token_limit: int | None = None
+    usage_quota_retry_after_seconds: int = 86_400
+    usage_quota_estimator_version: str = "prompt_utf8_v0_1"
     auth_pre_rate_per_minute: int = 20
     auth_pre_burst: int = 5
     auth_pre_global_rate_per_minute: int = 300
@@ -476,6 +487,21 @@ class Settings:
             password_work_wait_timeout_seconds=float(
                 os.getenv("AEMEATH_PASSWORD_WORK_WAIT_TIMEOUT_SECONDS", "1")
             ),
+            usage_quota_enabled=_parse_bool(
+                os.getenv("AEMEATH_USAGE_QUOTA_ENABLED", "false")
+            ),
+            usage_quota_daily_turn_limit=int(
+                os.getenv("AEMEATH_USAGE_QUOTA_DAILY_TURN_LIMIT", "50")
+            ),
+            usage_quota_daily_token_limit=_parse_optional_int(
+                os.getenv("AEMEATH_USAGE_QUOTA_DAILY_TOKEN_LIMIT")
+            ),
+            usage_quota_retry_after_seconds=int(
+                os.getenv("AEMEATH_USAGE_QUOTA_RETRY_AFTER_SECONDS", "86400")
+            ),
+            usage_quota_estimator_version=os.getenv(
+                "AEMEATH_USAGE_QUOTA_ESTIMATOR_VERSION", "prompt_utf8_v0_1"
+            ).strip(),
             auth_pre_rate_per_minute=int(
                 os.getenv("AEMEATH_AUTH_PRE_RATE_PER_MINUTE", "20")
             ),
@@ -533,6 +559,27 @@ class Settings:
             raise ValueError("AEMEATH_PASSWORD_WORK_CONCURRENCY must be exactly 1 in v0.1.")
         if self.password_work_wait_timeout_seconds < 0:
             raise ValueError("AEMEATH_PASSWORD_WORK_WAIT_TIMEOUT_SECONDS must be non-negative.")
+        if self.usage_quota_enabled:
+            if (
+                not isinstance(self.usage_quota_daily_turn_limit, int)
+                or isinstance(self.usage_quota_daily_turn_limit, bool)
+                or self.usage_quota_daily_turn_limit <= 0
+            ):
+                raise ValueError("AEMEATH_USAGE_QUOTA_DAILY_TURN_LIMIT must be positive.")
+            if (
+                not isinstance(self.usage_quota_daily_token_limit, int)
+                or isinstance(self.usage_quota_daily_token_limit, bool)
+                or self.usage_quota_daily_token_limit <= 0
+            ):
+                raise ValueError("AEMEATH_USAGE_QUOTA_DAILY_TOKEN_LIMIT is required.")
+            if (
+                not isinstance(self.usage_quota_retry_after_seconds, int)
+                or isinstance(self.usage_quota_retry_after_seconds, bool)
+                or self.usage_quota_retry_after_seconds < 0
+            ):
+                raise ValueError("AEMEATH_USAGE_QUOTA_RETRY_AFTER_SECONDS must be non-negative.")
+            if self.usage_quota_estimator_version != "prompt_utf8_v0_1":
+                raise ValueError("AEMEATH_USAGE_QUOTA_ESTIMATOR_VERSION is not supported.")
         for name, value in (
             ("AEMEATH_AUTH_PRE_RATE_PER_MINUTE", self.auth_pre_rate_per_minute),
             ("AEMEATH_AUTH_PRE_BURST", self.auth_pre_burst),
@@ -759,8 +806,8 @@ class Settings:
                 raise ValueError(f"{name} must use the approved production path.")
         if self.db_backend != "sqlite_raw":
             raise ValueError("AEMEATH_DB_BACKEND must be sqlite_raw in prod.")
-        if self.api_auth_mode != "dev_bearer":
-            raise ValueError("The accepted D4 production baseline requires dev_bearer mode.")
+        if self.api_auth_mode not in {"dev_bearer", "web_session"}:
+            raise ValueError("Production auth mode is not approved.")
         if self.use_mock_llm:
             raise ValueError("AEMEATH_USE_MOCK_LLM must be false in prod.")
         if self.enable_model_fallback or self.api_enable_model_fallback:
@@ -783,19 +830,41 @@ class Settings:
             raise ValueError("App and trace logging must be enabled in prod.")
         if self.api_cors_allowed_origins:
             raise ValueError("Production CORS allowlist must be empty in v0.1.")
-        if not self.dev_auth_token:
-            raise ValueError("AEMEATH_DEV_AUTH_TOKEN_FILE is required in prod.")
-        if not self.dev_auth_token_from_file:
-            raise ValueError("AEMEATH_DEV_AUTH_TOKEN must come from its _FILE source in prod.")
-        if (
-            not self.default_user_id
-            or not self.dev_auth_user_id
-            or self.default_user_id == "user_default"
-            or self.dev_auth_user_id == "user_default"
-        ):
-            raise ValueError("Production user IDs must not use user_default.")
-        if self.default_user_id != self.dev_auth_user_id:
-            raise ValueError("Production default and bearer user IDs must match.")
+        if self.api_auth_mode == "dev_bearer":
+            if not self.dev_auth_token:
+                raise ValueError("AEMEATH_DEV_AUTH_TOKEN_FILE is required in prod.")
+            if not self.dev_auth_token_from_file:
+                raise ValueError("AEMEATH_DEV_AUTH_TOKEN must come from its _FILE source in prod.")
+            if (
+                not self.default_user_id
+                or not self.dev_auth_user_id
+                or self.default_user_id == "user_default"
+                or self.dev_auth_user_id == "user_default"
+            ):
+                raise ValueError("Production user IDs must not use user_default.")
+            if self.default_user_id != self.dev_auth_user_id:
+                raise ValueError("Production default and bearer user IDs must match.")
+            if self.web_auth_csrf_key is not None:
+                raise ValueError(
+                    "Web CSRF secret is not accepted in the Bearer production profile."
+                )
+        else:
+            if self.dev_auth_token is not None or self.dev_auth_token_from_file:
+                raise ValueError("Production Web Session mode rejects dev Bearer credentials.")
+            if not self.web_auth_csrf_key_from_file:
+                raise ValueError(
+                    "AEMEATH_WEB_AUTH_CSRF_KEY must come from its _FILE source in prod."
+                )
+            if not self.default_user_id or self.default_user_id == "user_default":
+                raise ValueError("Production default user ID must not use user_default.")
+            if not self.usage_quota_enabled:
+                raise ValueError("Production Web Session mode requires usage quota.")
+            if (
+                self.usage_quota_daily_turn_limit != 50
+                or self.usage_quota_daily_token_limit != 200_000
+                or self.usage_quota_estimator_version != "prompt_utf8_v0_1"
+            ):
+                raise ValueError("Production Web Session quota must use the approved v0.1 limits.")
         if not self.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY_FILE is required in prod.")
         if not self.deepseek_api_key_from_file:

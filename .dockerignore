@@ -6,6 +6,12 @@
 !scripts
 !scripts/deployment
 !scripts/deployment/**
+!deploy
+!deploy/Caddyfile
+!deploy/Caddy.Dockerfile
+!web
+!web/dist
+!web/dist/**
 
 **/__pycache__
 **/*.py[cod]

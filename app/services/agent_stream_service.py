@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from threading import Condition, Lock, Thread, current_thread
 from time import monotonic
 from typing import Any, Iterator, Literal
@@ -26,6 +27,22 @@ from app.model.streaming import (
 from app.observability.noop import NoopAppLogger
 from app.observability.ports import AppLoggerPort
 from app.observability.schemas import AppLogRecord
+from app.quota.errors import UsageQuotaExceededError
+from app.quota.ports import StreamQuotaTurnPersistencePort, UsageQuotaPolicyPort
+from app.quota.schemas import (
+    StreamQuotaComplete,
+    StreamQuotaFail,
+    StreamQuotaProviderStarted,
+    StreamQuotaReservationRecord,
+    StreamQuotaResolveOrReserve,
+    StreamQuotaResolveOutcome,
+    StreamQuotaTerminalRecord,
+    UsageOutputEstimateRequest,
+    UsagePromptEstimateRequest,
+    UsageQuotaPlan,
+    UsageQuotaPlanRequest,
+)
+from app.quota.service import prompt_messages_utf8_bytes
 from app.runtime.guardrails.errors import RuntimeBusyError
 from app.runtime.guardrails.ports import (
     ChatInputLimitPolicyPort,
@@ -95,6 +112,34 @@ class StreamServiceLimits:
             raise ValueError("stream_public_delta_limit_too_small")
         if self.producer_put_timeout_seconds <= 0 or self.producer_join_timeout_seconds <= 0:
             raise ValueError("stream_service_timeout_invalid")
+
+
+@dataclass(frozen=True)
+class StreamQuotaSettings:
+    daily_turn_limit: int
+    daily_token_limit: int
+    retry_after_seconds: int
+    estimator_version: str
+    context_budget_max_chars: int
+    max_output_tokens: int
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.daily_turn_limit,
+            self.daily_token_limit,
+            self.context_budget_max_chars,
+            self.max_output_tokens,
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError("stream_quota_positive_integer_required")
+        if (
+            not isinstance(self.retry_after_seconds, int)
+            or isinstance(self.retry_after_seconds, bool)
+            or self.retry_after_seconds < 0
+        ):
+            raise ValueError("stream_quota_retry_after_invalid")
+        if not isinstance(self.estimator_version, str) or not self.estimator_version:
+            raise ValueError("stream_quota_estimator_version_required")
 
 
 class CancellationToken:
@@ -182,15 +227,26 @@ class AgentStreamService:
         input_limit_policy: ChatInputLimitPolicyPort,
         active_stream_registry: ActiveStreamRegistry,
         owner_runtime_id: str,
+        quota_persistence: StreamQuotaTurnPersistencePort | None = None,
+        quota_policy: UsageQuotaPolicyPort | None = None,
+        quota_settings: StreamQuotaSettings | None = None,
         limits: StreamServiceLimits | None = None,
         key_registry: RefCountedStreamKeyRegistry | None = None,
         app_logger: AppLoggerPort | None = None,
     ) -> None:
         if not owner_runtime_id:
             raise ValueError("stream_owner_runtime_id_required")
+        quota_parts = (quota_persistence, quota_policy, quota_settings)
+        if any(part is None for part in quota_parts) and not all(
+            part is None for part in quota_parts
+        ):
+            raise ValueError("stream_quota_dependencies_incomplete")
         self.turn_engine = turn_engine
         self.model_client = model_client
         self.persistence = persistence
+        self.quota_persistence = quota_persistence
+        self.quota_policy = quota_policy
+        self.quota_settings = quota_settings
         self.admission = admission
         self.input_limit_policy = input_limit_policy
         self.active_stream_registry = active_stream_registry
@@ -198,6 +254,14 @@ class AgentStreamService:
         self.limits = limits or StreamServiceLimits()
         self.key_registry = key_registry or RefCountedStreamKeyRegistry()
         self.app_logger = app_logger or NoopAppLogger()
+
+    @property
+    def quota_enabled(self) -> bool:
+        return (
+            self.quota_persistence is not None
+            and self.quota_policy is not None
+            and self.quota_settings is not None
+        )
 
     def stream_chat(
         self,
@@ -245,19 +309,24 @@ class AgentStreamService:
                 character_resolution = self.turn_engine.resolve_character(
                     requested_character_id=request.character_id
                 )
-                outcome = self.persistence.resolve_or_reserve(
-                    request=StreamTurnResolveOrReserve(
-                        user_id=user_context.user_id,
-                        session_id=request.session_id,
-                        active_character_id=character_resolution.active_character_id,
-                        client_message_id=request.client_message_id,
-                        request_fingerprint_version=FINGERPRINT_VERSION_V1,
-                        request_fingerprint=fingerprint,
-                        owner_runtime_id=self.owner_runtime_id,
-                        turn_id=candidate_turn_id,
-                        user_message_id=new_id("message"),
-                        user_message_content=request.message,
-                    )
+                reserve_request = StreamTurnResolveOrReserve(
+                    user_id=user_context.user_id,
+                    session_id=request.session_id,
+                    active_character_id=character_resolution.active_character_id,
+                    client_message_id=request.client_message_id,
+                    request_fingerprint_version=FINGERPRINT_VERSION_V1,
+                    request_fingerprint=fingerprint,
+                    owner_runtime_id=self.owner_runtime_id,
+                    turn_id=candidate_turn_id,
+                    user_message_id=new_id("message"),
+                    user_message_content=request.message,
+                )
+                outcome = self._resolve_or_reserve(
+                    reserve_request=reserve_request,
+                    active_character_id=character_resolution.active_character_id,
+                    user_context=user_context,
+                    request=request,
+                    request_id=request_id,
                 )
                 outcome = self._resolve_local_in_progress(
                     outcome=outcome,
@@ -282,17 +351,13 @@ class AgentStreamService:
                         )
                     except Exception as exc:
                         error = map_exception(exc)
-                        self.persistence.fail(
-                            request=StreamTurnFail(
-                                record_id=outcome.record.id,
-                                turn_id=outcome.record.turn_id,
-                                user_id=outcome.record.user_id,
-                                session_id=outcome.record.session_id,
-                                owner_runtime_id=self.owner_runtime_id,
-                                terminal_error_code=error.code.value,
-                                terminal_retryable=error.retryable,
-                                terminal_reason="preparation_failed",
-                            )
+                        self._fail_reserved_turn(
+                            record=outcome.record,
+                            terminal_error_code=error.code.value,
+                            terminal_retryable=error.retryable,
+                            terminal_reason="preparation_failed",
+                            request_id=request_id,
+                            request=request,
                         )
                         raise
                 handle = _ChatStreamHandle(
@@ -302,6 +367,9 @@ class AgentStreamService:
                     turn_engine=self.turn_engine,
                     model_client=self.model_client,
                     persistence=self.persistence,
+                    quota_persistence=self.quota_persistence,
+                    quota_policy=self.quota_policy,
+                    quota_settings=self.quota_settings,
                     admission_handle=admission_handle,
                     active_stream_registry=self.active_stream_registry,
                     owner_runtime_id=self.owner_runtime_id,
@@ -347,6 +415,128 @@ class AgentStreamService:
                             pass
                 raise
 
+    def _resolve_or_reserve(
+        self,
+        *,
+        reserve_request: StreamTurnResolveOrReserve,
+        active_character_id: str,
+        user_context: UserContext,
+        request: StreamChatRequest,
+        request_id: str,
+    ) -> StreamTurnResolveOutcome:
+        if not self.quota_enabled:
+            return self.persistence.resolve_or_reserve(request=reserve_request)
+        assert self.quota_persistence is not None
+        assert self.quota_policy is not None
+        assert self.quota_settings is not None
+        quota_plan = self.quota_policy.plan_stream_reservation(
+            request=UsageQuotaPlanRequest(
+                user_id=user_context.user_id,
+                quota_day=_utc_quota_day(),
+                surface="stream_chat",
+                character_id=active_character_id,
+                turn_limit=self.quota_settings.daily_turn_limit,
+                token_limit=self.quota_settings.daily_token_limit,
+                estimator_version=self.quota_settings.estimator_version,
+                context_budget_max_chars=self.quota_settings.context_budget_max_chars,
+                max_output_tokens=self.quota_settings.max_output_tokens,
+            )
+        )
+        quota_outcome = self.quota_persistence.resolve_or_reserve_with_quota(
+            request=StreamQuotaResolveOrReserve(
+                stream_request=reserve_request,
+                quota_plan=quota_plan,
+                retry_after_seconds=self.quota_settings.retry_after_seconds,
+            )
+        )
+        if quota_outcome.kind == "quota_exceeded":
+            self._record_quota_rejected(
+                request_id=request_id,
+                user_id=user_context.user_id,
+                request=request,
+                quota_plan=quota_plan,
+                retry_after_seconds=(
+                    quota_outcome.retry_after_seconds
+                    if quota_outcome.retry_after_seconds is not None
+                    else self.quota_settings.retry_after_seconds
+                ),
+            )
+            raise UsageQuotaExceededError(
+                retry_after_seconds=(
+                    quota_outcome.retry_after_seconds
+                    if quota_outcome.retry_after_seconds is not None
+                    else self.quota_settings.retry_after_seconds
+                )
+            )
+        if quota_outcome.kind == "reserved" and quota_outcome.quota_reservation is not None:
+            self._record_quota_reserved(
+                request_id=request_id,
+                user_id=user_context.user_id,
+                request=request,
+                reservation=quota_outcome.quota_reservation,
+            )
+        return _stream_outcome_from_quota(quota_outcome)
+
+    def _fail_reserved_turn(
+        self,
+        *,
+        record: StreamRequestRecord,
+        terminal_error_code: str,
+        terminal_retryable: bool,
+        terminal_reason: str,
+        request_id: str | None = None,
+        request: StreamChatRequest | None = None,
+    ) -> StreamRequestRecord:
+        if not self.quota_enabled:
+            return self.persistence.fail(
+                request=StreamTurnFail(
+                    record_id=record.id,
+                    turn_id=record.turn_id,
+                    user_id=record.user_id,
+                    session_id=record.session_id,
+                    owner_runtime_id=self.owner_runtime_id,
+                    terminal_error_code=terminal_error_code,
+                    terminal_retryable=terminal_retryable,
+                    terminal_reason=terminal_reason,
+                )
+            )
+        assert self.quota_persistence is not None
+        terminal = self.quota_persistence.fail_with_quota(
+            request=StreamQuotaFail(
+                stream_request_id=record.id,
+                turn_id=record.turn_id,
+                user_id=record.user_id,
+                session_id=record.session_id,
+                owner_runtime_id=self.owner_runtime_id,
+                terminal_error_code=terminal_error_code,
+                terminal_retryable=terminal_retryable,
+                terminal_reason=terminal_reason,
+            )
+        )
+        if terminal.quota_reservation is not None:
+            log_request = request or StreamChatRequest(
+                session_id=record.session_id,
+                character_id=record.active_character_id,
+                message="",
+                client_message_id=record.client_message_id,
+                metadata={},
+            )
+            self._record(
+                event_name=(
+                    "usage_quota.settled"
+                    if terminal.quota_reservation.status == "settled"
+                    else "usage_quota.released"
+                ),
+                level="info",
+                request_id=request_id or "",
+                turn_id=terminal.quota_reservation.turn_id,
+                user_id=record.user_id,
+                request=log_request,
+                error_code=terminal.quota_reservation.terminal_error_code,
+                payload=_quota_log_payload(terminal.quota_reservation),
+            )
+        return terminal.stream_record
+
     def _resolve_local_in_progress(
         self,
         *,
@@ -358,19 +548,62 @@ class AgentStreamService:
             return outcome
         if self.active_stream_registry.is_live_turn(turn_id=outcome.record.turn_id):
             return outcome
-        record = self.persistence.fail(
-            request=StreamTurnFail(
-                record_id=outcome.record.id,
-                turn_id=outcome.record.turn_id,
-                user_id=user_context.user_id,
-                session_id=request.session_id,
-                owner_runtime_id=self.owner_runtime_id,
-                terminal_error_code=ErrorCode.CHAT_STREAM_INTERRUPTED.value,
-                terminal_retryable=False,
-                terminal_reason="runtime_orphaned",
-            )
+        record = self._fail_reserved_turn(
+            record=outcome.record,
+            terminal_error_code=ErrorCode.CHAT_STREAM_INTERRUPTED.value,
+            terminal_retryable=False,
+            terminal_reason="runtime_orphaned",
+            request_id=user_context.request_id,
+            request=request,
         )
         return StreamTurnResolveOutcome(kind="replay_failed", record=record)
+
+    def _record_quota_rejected(
+        self,
+        *,
+        request_id: str,
+        user_id: str,
+        request: StreamChatRequest,
+        quota_plan: UsageQuotaPlan,
+        retry_after_seconds: int,
+    ) -> None:
+        self._record(
+            event_name="usage_quota.rejected",
+            level="warning",
+            request_id=request_id,
+            turn_id=None,
+            user_id=user_id,
+            request=request,
+            error_code=ErrorCode.USAGE_QUOTA_EXCEEDED.value,
+            payload={
+                "quota_day": quota_plan.quota_day,
+                "surface": quota_plan.surface,
+                "estimator_version": quota_plan.estimator_version,
+                "reserved_turns": quota_plan.reserved_turns,
+                "reserved_tokens": quota_plan.reserved_tokens,
+                "turn_limit": quota_plan.turn_limit,
+                "token_limit": quota_plan.token_limit,
+                "retry_after_seconds": retry_after_seconds,
+            },
+        )
+
+    def _record_quota_reserved(
+        self,
+        *,
+        request_id: str,
+        user_id: str,
+        request: StreamChatRequest,
+        reservation: StreamQuotaReservationRecord,
+    ) -> None:
+        self._record(
+            event_name="usage_quota.reserved",
+            level="info",
+            request_id=request_id,
+            turn_id=reservation.turn_id,
+            user_id=user_id,
+            request=request,
+            payload=_quota_log_payload(reservation),
+        )
 
     def _validate_and_copy_request(self, *, request: StreamChatRequest) -> dict[str, Any]:
         if not isinstance(request.session_id, str) or not request.session_id:
@@ -435,6 +668,9 @@ class _ChatStreamHandle:
         turn_engine: DialogueTurnEngine,
         model_client: StreamingChatModelClient,
         persistence: StreamTurnPersistencePort,
+        quota_persistence: StreamQuotaTurnPersistencePort | None,
+        quota_policy: UsageQuotaPolicyPort | None,
+        quota_settings: StreamQuotaSettings | None,
         admission_handle: DialogueAdmissionHandle,
         active_stream_registry: ActiveStreamRegistry,
         owner_runtime_id: str,
@@ -458,6 +694,9 @@ class _ChatStreamHandle:
         self._turn_engine = turn_engine
         self._model_client = model_client
         self._persistence = persistence
+        self._quota_persistence = quota_persistence
+        self._quota_policy = quota_policy
+        self._quota_settings = quota_settings
         self._admission_handle = admission_handle
         self._registry = active_stream_registry
         self._owner_runtime_id = owner_runtime_id
@@ -484,6 +723,14 @@ class _ChatStreamHandle:
         self._delta_count = 0
         self._response_char_count = 0
         self._response_utf8_bytes = 0
+
+    @property
+    def _quota_enabled(self) -> bool:
+        return (
+            self._quota_persistence is not None
+            and self._quota_policy is not None
+            and self._quota_settings is not None
+        )
 
     def __repr__(self) -> str:
         return (
@@ -590,6 +837,7 @@ class _ChatStreamHandle:
                 preflight=preflight,
                 user_message_id=self._outcome.record.user_message_id,
             )
+            self._mark_provider_started(prepared=prepared)
             self._turn_engine.record_response_stream_started(preflight=preflight)
             finish_kind: str | None = None
             with self._model_client.open_stream(
@@ -627,17 +875,10 @@ class _ChatStreamHandle:
                 assistant_response=answer,
             )
             self._raise_if_cancelled()
-            record = self._persistence.complete(
-                request=StreamTurnComplete(
-                    record_id=self._outcome.record.id,
-                    turn_id=self.turn_id,
-                    user_id=self._outcome.record.user_id,
-                    session_id=self.session_id,
-                    owner_runtime_id=self._owner_runtime_id,
-                    assistant_response=answer,
-                    state_update=completion_plan.state_update,
-                    warnings=tuple(preflight.warnings),
-                )
+            record = self._complete_reserved_turn(
+                assistant_response=answer,
+                state_update=completion_plan.state_update,
+                warnings=tuple(preflight.warnings),
             )
             if record.status != "completed":
                 self._terminalize_from_record(record=record, prepared=prepared)
@@ -658,6 +899,153 @@ class _ChatStreamHandle:
             self._record_terminal(status="completed", error_code=None)
         except BaseException as exc:
             self._terminalize_failure(error=exc, prepared=prepared)
+
+    def _mark_provider_started(self, *, prepared: PreparedDialogueTurn) -> None:
+        if not self._quota_enabled:
+            return
+        assert self._quota_persistence is not None
+        assert self._quota_policy is not None
+        assert self._quota_settings is not None
+        prompt_utf8_bytes = prompt_messages_utf8_bytes(prepared.prompt_messages)
+        prompt_estimate = self._quota_policy.estimate_prompt(
+            request=UsagePromptEstimateRequest(
+                estimator_version=self._quota_settings.estimator_version,
+                prompt_messages_utf8_bytes=prompt_utf8_bytes,
+                max_output_tokens=self._quota_settings.max_output_tokens,
+            )
+        )
+        reservation = self._quota_persistence.mark_provider_started_with_quota(
+            request=StreamQuotaProviderStarted(
+                stream_request_id=self._outcome.record.id,
+                turn_id=self.turn_id,
+                user_id=self._outcome.record.user_id,
+                session_id=self.session_id,
+                owner_runtime_id=self._owner_runtime_id,
+                prompt_estimate=prompt_estimate,
+                retry_after_seconds=self._quota_settings.retry_after_seconds,
+            )
+        )
+        if reservation.status == "released":
+            self._record_quota_terminal(reservation=reservation)
+            raise UsageQuotaExceededError(
+                retry_after_seconds=self._quota_settings.retry_after_seconds,
+                reason=reservation.terminal_reason or "daily_limit_reached",
+            )
+        self._safe_app_log(
+            event_name="usage_quota.provider_started",
+            level="info",
+            error_code=None,
+            payload=_quota_log_payload(reservation),
+        )
+
+    def _complete_reserved_turn(
+        self,
+        *,
+        assistant_response: str,
+        state_update,
+        warnings: tuple[str, ...],
+    ) -> StreamRequestRecord:
+        if not self._quota_enabled:
+            return self._persistence.complete(
+                request=StreamTurnComplete(
+                    record_id=self._outcome.record.id,
+                    turn_id=self.turn_id,
+                    user_id=self._outcome.record.user_id,
+                    session_id=self.session_id,
+                    owner_runtime_id=self._owner_runtime_id,
+                    assistant_response=assistant_response,
+                    state_update=state_update,
+                    warnings=warnings,
+                )
+            )
+        assert self._quota_persistence is not None
+        assert self._quota_policy is not None
+        assert self._quota_settings is not None
+        output_estimate = self._quota_policy.estimate_output(
+            request=UsageOutputEstimateRequest(
+                estimator_version=self._quota_settings.estimator_version,
+                response_utf8_bytes=self._response_utf8_bytes,
+                delta_count=self._delta_count,
+                max_output_tokens=self._quota_settings.max_output_tokens,
+            )
+        )
+        terminal = self._quota_persistence.complete_with_quota(
+            request=StreamQuotaComplete(
+                stream_request_id=self._outcome.record.id,
+                turn_id=self.turn_id,
+                user_id=self._outcome.record.user_id,
+                session_id=self.session_id,
+                owner_runtime_id=self._owner_runtime_id,
+                assistant_response=assistant_response,
+                state_update=state_update,
+                output_estimate=output_estimate,
+                warnings=warnings,
+            )
+        )
+        self._record_quota_terminal_from_result(terminal=terminal)
+        return terminal.stream_record
+
+    def _fail_reserved_turn(
+        self,
+        *,
+        terminal_error_code: str,
+        terminal_retryable: bool,
+        terminal_reason: str,
+    ) -> StreamRequestRecord:
+        if not self._quota_enabled:
+            return self._persistence.fail(
+                request=StreamTurnFail(
+                    record_id=self._outcome.record.id,
+                    turn_id=self.turn_id,
+                    user_id=self._outcome.record.user_id,
+                    session_id=self.session_id,
+                    owner_runtime_id=self._owner_runtime_id,
+                    terminal_error_code=terminal_error_code,
+                    terminal_retryable=terminal_retryable,
+                    terminal_reason=terminal_reason,
+                )
+            )
+        assert self._quota_persistence is not None
+        terminal = self._quota_persistence.fail_with_quota(
+            request=StreamQuotaFail(
+                stream_request_id=self._outcome.record.id,
+                turn_id=self.turn_id,
+                user_id=self._outcome.record.user_id,
+                session_id=self.session_id,
+                owner_runtime_id=self._owner_runtime_id,
+                terminal_error_code=terminal_error_code,
+                terminal_retryable=terminal_retryable,
+                terminal_reason=terminal_reason,
+            )
+        )
+        self._record_quota_terminal_from_result(terminal=terminal)
+        return terminal.stream_record
+
+    def _record_quota_terminal_from_result(
+        self,
+        *,
+        terminal: StreamQuotaTerminalRecord,
+    ) -> None:
+        if terminal.quota_reservation is not None:
+            self._record_quota_terminal(reservation=terminal.quota_reservation)
+
+    def _record_quota_terminal(
+        self,
+        *,
+        reservation: StreamQuotaReservationRecord,
+    ) -> None:
+        if reservation.status == "settled":
+            event_name = "usage_quota.settled"
+        elif reservation.status == "released":
+            event_name = "usage_quota.released"
+        else:
+            event_name = "usage_quota.reserved"
+        self._safe_app_log(
+            event_name=event_name,
+            level="info",
+            error_code=reservation.terminal_error_code,
+            payload=_quota_log_payload(reservation),
+        )
 
     def _accept_delta(self, *, text: str, answer_parts: list[str]) -> None:
         if not isinstance(text, str):
@@ -767,17 +1155,10 @@ class _ChatStreamHandle:
         record: StreamRequestRecord | None = None
         if self.owns_in_progress_turn:
             try:
-                record = self._persistence.fail(
-                    request=StreamTurnFail(
-                        record_id=self._outcome.record.id,
-                        turn_id=self.turn_id,
-                        user_id=self._outcome.record.user_id,
-                        session_id=self.session_id,
-                        owner_runtime_id=self._owner_runtime_id,
-                        terminal_error_code=mapped_error.code.value,
-                        terminal_retryable=mapped_error.retryable,
-                        terminal_reason=_persistence_reason(mapped_error),
-                    )
+                record = self._fail_reserved_turn(
+                    terminal_error_code=mapped_error.code.value,
+                    terminal_retryable=mapped_error.retryable,
+                    terminal_reason=_persistence_reason(mapped_error),
                 )
             except Exception:
                 record = None
@@ -1027,6 +1408,42 @@ def _copy_json_value(value: Any) -> Any:
     raise ValueError("stream_metadata_invalid")
 
 
+def _utc_quota_day() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _stream_outcome_from_quota(outcome: StreamQuotaResolveOutcome) -> StreamTurnResolveOutcome:
+    if outcome.kind == "quota_exceeded" or outcome.record is None:
+        raise RuntimeError("stream_quota_outcome_without_stream_record")
+    return StreamTurnResolveOutcome(
+        kind=outcome.kind,
+        record=outcome.record,
+        assistant_message=outcome.assistant_message,
+    )
+
+
+def _quota_log_payload(reservation: StreamQuotaReservationRecord) -> dict[str, Any]:
+    return {
+        "quota_day": reservation.quota_day,
+        "surface": reservation.surface,
+        "status": reservation.status,
+        "charging_phase": reservation.charging_phase,
+        "estimator_version": reservation.estimator_version,
+        "reserved_turns": reservation.reserved_turns,
+        "settled_turns": reservation.settled_turns,
+        "reserved_tokens": reservation.reserved_tokens,
+        "settled_tokens": reservation.settled_tokens,
+        "reserved_input_tokens": reservation.reserved_input_tokens,
+        "reserved_output_tokens": reservation.reserved_output_tokens,
+        "prompt_messages_utf8_bytes": reservation.prompt_messages_utf8_bytes,
+        "prompt_input_tokens": reservation.prompt_input_tokens,
+        "output_utf8_bytes": reservation.output_utf8_bytes,
+        "output_tokens": reservation.output_tokens,
+        "delta_count": reservation.delta_count,
+        "terminal_reason": reservation.terminal_reason,
+    }
+
+
 def _split_utf8(text: str, max_bytes: int) -> Iterator[str]:
     part: list[str] = []
     part_bytes = 0
@@ -1054,6 +1471,8 @@ def _persistence_reason(error: AemeathError) -> str:
         return "session_archived"
     if error.code == ErrorCode.SESSION_ENDED:
         return "session_ended"
+    if error.code == ErrorCode.USAGE_QUOTA_EXCEEDED:
+        return "preparation_failed"
     return "preparation_failed"
 
 
@@ -1106,6 +1525,7 @@ def _public_message(code: ErrorCode) -> str:
         ErrorCode.MODEL_AUTH_FAILED: "The model service rejected authentication.",
         ErrorCode.SESSION_ARCHIVED: "Session is archived and cannot be used.",
         ErrorCode.SESSION_ENDED: "Session has ended. Resume it before sending messages.",
+        ErrorCode.USAGE_QUOTA_EXCEEDED: "Daily usage limit reached. Please try again later.",
     }
     return messages.get(code, "The streamed turn failed.")
 

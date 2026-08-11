@@ -14,6 +14,7 @@ from app.db.streaming_chat_migrations import (
     STREAMING_CHAT_IDEMPOTENCY_MIGRATION_ID,
     STREAMING_CHAT_IDEMPOTENCY_V1_MIGRATION_ID,
 )
+from app.db.usage_quota_migrations import USAGE_QUOTA_MIGRATION_ID
 
 
 def _store(backend: str, db_path: Path):
@@ -142,6 +143,12 @@ def test_streaming_chat_v1_table_is_promoted_atomically(tmp_path: Path, backend:
         first.engine.dispose()
 
     with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (USAGE_QUOTA_MIGRATION_ID,),
+        )
+        connection.execute("DROP TABLE usage_quota_reservations")
+        connection.execute("DROP TABLE usage_quota_daily")
         for index_name in (
             "uq_chat_request_idempotency_scope",
             "uq_chat_request_idempotency_turn",

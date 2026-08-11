@@ -2428,7 +2428,7 @@ Manager final acceptance (2026-08-07):
 
 ### T-0145 React/Vite Web Frontend v0.1
 
-Status: `pending`
+Status: `done`
 
 Scope:
 - invitation/login/chat screens, Session navigation, text streaming, stop/retry/error/expiry states,
@@ -2438,9 +2438,24 @@ Gate:
 - API/Auth/stream contracts must be frozen. No credential or token may be stored in browser storage,
   source, build artifacts, or analytics.
 
+Manager final acceptance (2026-08-10):
+- Accepted `web/` as the independent React/TypeScript/Vite local-runtime frontend. It consumes only
+  the public Browser Auth, Session, and streaming APIs and does not access Controller, Persistence,
+  or provider internals.
+- Accepted invitation/login/reset, in-memory CSRF, Session navigation and lifecycle controls,
+  streaming dialogue with explicit cancellation, responsive layouts, and isolated character visual
+  configuration. Temporary Dania assets remain replaceable and require rights review before release.
+- The final changes-requested repairs preserve a public `turn.failed` reason across durable history
+  refresh and remove invitation/reset credentials from the URL fragment immediately after capture.
+- Manager verification passed `npm test` (`9 passed`), `npm run build` (approximately `61.84 kB`
+  gzip JavaScript), and `git diff --check` with only the existing CRLF warning.
+- No production-readiness claim is made. Unified authentication-expiry redirect, older-history UI
+  pagination, Caddy SPA hosting, authenticated browser E2E, security headers/quota, and final visual
+  assets remain governed by T-0146 and deployment acceptance. T-0145 is accepted and `done`.
+
 ### T-0146 Web Security, Quota, And E2E Gate v0.1
 
-Status: `pending`
+Status: `in_progress`
 
 Scope:
 - pre-auth abuse controls, per-account usage quota, CSP/security headers, cross-user/security fault
@@ -2449,3 +2464,90 @@ Scope:
 Gate:
 - This task does not replace T-0140 D6/D7/D8. D6 may proceed after T-0142 schema freeze; D8 performs
   final real-cloud Web acceptance.
+
+Manager design acceptance (2026-08-10):
+- Approved the narrow `StreamQuotaTurnPersistencePort` as the only quota write boundary. New stream
+  reservation, user-message persistence, idempotency, and quota reservation must commit atomically;
+  stream terminal persistence and quota settlement/release must also share one transaction.
+- Approved the raw SQLite/SQLAlchemy-on-SQLite quota schema direction, UTC quota day, frozen daily
+  limits/estimator version, owner/runtime recovery facts, and `released`/`settled` orphan outcomes.
+- Approved `prompt_utf8_v0_1` for implementation and qualification only. The production token/day
+  value remains unset until qualification evidence is reviewed; `50` turns/day is the invitation
+  test candidate.
+- Approved production Web Session auth, removal of production dev Bearer, dual Caddy/FastAPI denial
+  of synchronous `/v1/chat`, strict CSP-compatible hashed frontend assets, and the multi-stage Caddy
+  build direction.
+- Phase 1 is authorized: quota DTOs/policy/query contracts, migration, stream+quota UoW for both
+  backends, contract tests, and estimator qualification. The Worker must stop for a Manager
+  checkpoint before AgentStreamService, frontend, Caddy/Compose, or Playwright integration.
+
+Manager Phase 1 acceptance (2026-08-11):
+- Accepted the quota DTO/port boundary, strict migration, raw SQLite and SQLAlchemy-on-SQLite store
+  parity, and the atomic stream+quota UoW after checkpoint repair.
+- Manager revalidation passed the combined quota and streaming-migration suite (`44 passed`), scoped
+  Ruff, compileall, and `git diff --check` with only existing LF/CRLF warnings.
+- Verified that quota idempotency is scoped by `(session_id, client_message_id)`, completion cannot
+  bypass the persisted `provider_started` phase, and live wrong-owner provider/terminal operations
+  fail closed without mutating stream, message, relationship, or quota state.
+- Phase 2 is authorized only for streaming runtime integration: wire the shared quota policy and UoW
+  into `AgentStreamService`, persist provider-started immediately before Provider iteration, settle or
+  release quota through first-wins terminalization and startup recovery, expose safe quota errors and
+  `Retry-After`, add validated runtime configuration and safe observability/admin summaries, and deny
+  synchronous `/v1/chat` in the production Web profile at the FastAPI boundary.
+- Phase 2 must stop for another Manager checkpoint. Frontend behavior, character asset migration,
+  Caddy/Compose static hosting, Playwright E2E, and final production quota values remain unauthorized.
+
+Manager Phase 2 review - changes requested (2026-08-11):
+- The main streaming order is correct and the focused Phase 2 suite passed (`111 passed`), but startup
+  quota recovery executes only one bounded batch. A valid configuration with more foreign orphaned
+  turns than `stream_orphan_recovery_limit` leaves old-owner rows behind; replaying one then fails with
+  `usage_quota_owner_mismatch`. Pre-quota legacy in-progress rows without a reservation also need an
+  explicit upgrade-safe recovery path.
+- Quota-enabled provider failure, cancellation/disconnect, durable-completion-versus-late-cancel, and
+  multi-batch/legacy orphan recovery require direct integration tests. Existing non-quota streaming
+  tests do not exercise the new terminal UoW.
+- Preflight failure releases quota in Persistence but the service-level preflight path drops the
+  returned quota terminal record, so no `usage_quota.released` terminal summary is emitted despite the
+  Phase 2 delivery claim. Safe terminal logging must cover both pre-handle and handle-owned failures.
+- The synchronous-chat guard is staged but `Settings._validate_production()` still rejects
+  `api_auth_mode=web_session`; production Web activation remains a later Caddy/profile checkpoint and
+  must not be represented as currently runnable. Quota env templates and the safe admin usage query
+  remain delivery gaps.
+- Phase 3 remains blocked. The Worker may make only narrow Phase 2 repairs and must return for Manager
+  re-review without modifying frontend, Caddy, Compose, Docker, or Playwright.
+
+Manager Phase 2 re-review - accepted (2026-08-11):
+- Verified that startup recovery drains all bounded quota batches before processing legacy
+  pre-quota in-progress stream records. Recovered reservations are terminalized before the legacy
+  cleanup path, preventing old-owner replay from failing with `usage_quota_owner_mismatch`.
+- Verified quota-enabled terminal behavior for Provider failure, pre-Provider cancellation,
+  post-Provider cancellation/disconnect, and durable completion versus late cancellation. Preflight
+  failures now emit the safe `usage_quota.released` terminal summary.
+- Confirmed the production environment template stages quota configuration without enabling it or
+  inventing an unqualified token/day limit. The current D4 `dev_bearer` production baseline remains
+  unchanged and is not represented as a runnable Web Session production profile.
+- Manager revalidation passed the focused `tests/test_agent_stream_service.py` suite, full `pytest`
+  regression, `ruff check .`, compileall, and `git diff --check`; only existing skips, deprecation
+  warnings, and LF/CRLF notices remain.
+- Phase 2 is accepted. Phase 3 is authorized only for the production Web application gate: switch the
+  reviewed production profile to `web_session`, remove production dev Bearer wiring, keep synchronous
+  `/v1/chat` denied at both FastAPI and Caddy, add same-origin SPA/static hosting and security headers,
+  complete frontend auth-expiry handling and hashed asset integration, qualify and freeze the initial
+  quota values, and run real Caddy/Compose Playwright E2E.
+- D6 backup/restore acceptance, D7 operational monitoring/retention, D8 cloud acceptance, and a future
+  admin usage-query surface remain separate tasks and are not authorized as Phase 3 implementation.
+
+Manager Phase 3 Lite implementation (2026-08-11):
+- Switched the tracked production Web profile to invitation-only `web_session`, removed production
+  dev Bearer wiring, required the approved Web CSRF `_FILE` secret, and froze the small-launch quota
+  at 50 turns plus 200,000 `prompt_utf8_v0_1` estimated tokens per UTC day.
+- Caddy now denies synchronous `/v1/chat`, proxies only API/health paths, serves the prebuilt Vite SPA,
+  applies the reviewed non-HSTS security headers, and caches only content-hashed assets immutably.
+- Frontend authentication invalidation, stream abort on protected-view unmount, hashed character
+  assets, CSP-compatible styling, and stable login/chat selectors are implemented without freezing
+  future visual replacement.
+- Manager validation passed `npm test` (`11 passed`), `npm run build`, focused deployment/API tests,
+  full `pytest`, Compose configuration rendering, Ruff, compileall, and diff checks.
+- T-0146 remains `in_progress`: Docker daemon was unavailable, so the real proxy image build, pinned
+  Caddy validation, and browser-through-Compose smoke remain an environment gate. Full Playwright
+  matrices, quota admin UI/query, D6, D7, and D8 remain deferred or separately owned.
