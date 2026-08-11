@@ -215,6 +215,9 @@ web/.npm-cache/
 web/coverage/
 web/reference-assets/
 
+# Local frontend captures and superseded visual references are not release assets.
+/frontend/
+
 # Aemeath runtime data
 .aemeath/
 data/*.db

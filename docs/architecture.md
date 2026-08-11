@@ -1,5 +1,28 @@
 # Aemeath Agent Architecture
 
+## 2026-08-11 v1.0.0-rc.1 Release Candidate
+
+The current release candidate promotes the invitation-only Web path to the primary deployment
+surface while preserving the CLI and the existing port-based domain architecture:
+
+```text
+Browser -> Caddy -> FastAPI
+  -> Browser Auth / CSRF / rate limit / usage quota
+  -> AgentStreamService / SessionService
+  -> DialogueTurnEngine
+  -> Character / Semantic / Memory / Evidence / Prompt / Model / State ports
+  -> SQLite
+```
+
+T-0142 through T-0145 are accepted. T-0146 Phase 3 Lite supplies the frozen production Web profile,
+same-origin SPA, security headers, and invitation-test quota. Deployment D1-D4 and D6-D7 are
+accepted. D5 remains deliberately disabled; D8 real-ECS HTTPS, browser, reboot, image-replacement,
+and restore evidence is the only stable-v1.0 promotion gate.
+
+The production RC remains one host and one Uvicorn worker because admission, streaming registry,
+rate limits, and the LLM gate are process-local. Long-term Memory, Memory Worker, local embedding,
+managed vector RAG, and audio are not active production dependencies.
+
 ## 2026-06-08 v0.3 Release Baseline
 
 v0.3 keeps `DialogueController` as an orchestration layer and promotes Session and
@@ -62,10 +85,10 @@ synchronous `AgentService` path remains compatible while the Web frontend uses t
 streaming path. The production target has Caddy serve static assets and API from one HTTPS origin,
 so production CORS remains empty and the final runtime image does not run Node.js.
 
-Implementation is split into T-0142 through T-0146. T-0142 through T-0145 are accepted; D6 backup may
-proceed against the frozen Auth, streaming, and Session persistence schemas. T-0146 retains
-production static hosting, unified authentication-expiry handling, security/quota, and browser E2E
-work. D7 must observe final Web events, and D8 remains the real-cloud acceptance gate.
+Implementation is split into T-0142 through T-0146. T-0142 through T-0145 are accepted, and T-0146
+Phase 3 Lite has supplied production static hosting, unified authentication-expiry handling,
+security headers, and quota. D6-D7 are accepted; full real-browser/cloud evidence is now part of
+the D8 stable-release gate.
 
 ## 2026-08-07 Web Session API v0.1
 

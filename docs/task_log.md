@@ -2475,7 +2475,7 @@ Manager final acceptance (2026-08-10):
 
 ### T-0146 Web Security, Quota, And E2E Gate v0.1
 
-Status: `in_progress`
+Status: `done`
 
 Scope:
 - pre-auth abuse controls, per-account usage quota, CSP/security headers, cross-user/security fault
@@ -2571,3 +2571,32 @@ Manager Phase 3 Lite implementation (2026-08-11):
 - T-0146 remains `in_progress`: Docker daemon was unavailable, so the real proxy image build, pinned
   Caddy validation, and browser-through-Compose smoke remain an environment gate. Full Playwright
   matrices, quota admin UI/query, D6, D7, and D8 remain deferred or separately owned.
+
+Manager scope closure (2026-08-11):
+- Accepted Phase 3 Lite as the production-code closure for T-0146: invitation-only Web Session auth,
+  synchronous-chat denial, same-origin SPA/Caddy routing, reviewed non-HSTS security headers,
+  authentication-expiry handling, and the frozen invitation-test quota are implemented.
+- Full Playwright matrices, real-domain HTTPS, reboot/image replacement, and cloud restore evidence
+  are not missing T-0146 implementation. They move to the D8 external promotion gate under T-0140.
+- Quota administration UI/query, public registration, and broader analytics remain deferred product
+  features rather than blockers for the small invitation launch.
+
+### T-0147 v1.0.0 Release Candidate Closure
+
+Status: `done`
+
+Scope:
+- Align package, README, Changelog, architecture summary, and release notes with the deployable Web
+  release candidate.
+- Include the current Aemeath visual configuration while excluding local frontend captures,
+  generated Web output, runtime data, databases, logs, and secrets.
+- Publish the complete implementation history on a release-candidate branch and tag without
+  representing the pending D8 cloud evidence as already accepted.
+
+Manager closure (2026-08-11):
+- Version is `1.0.0rc1` in Python metadata and `v1.0.0-rc.1` in human-facing release/tag naming.
+- Stable `v1.0.0` is reserved for successful D8 real-ECS HTTPS, authenticated browser, reboot,
+  image-replacement, backup/restore, and host-operations acceptance.
+- The release includes source and reproducible build inputs. `web/dist/` remains generated output;
+  `.env`, Provider keys, CSRF keys, SQLite files, JSONL logs, RAG indexes, and local capture material
+  remain excluded.

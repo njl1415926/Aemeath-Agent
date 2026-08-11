@@ -22,8 +22,8 @@ npm test
 npm run build
 ```
 
-The current visual assets under `src/assets/` are temporary Dania references. Vite emits content-
-hashed production files. Their selection and display name are isolated in
+The current visual assets under `src/assets/` are release-candidate Aemeath references. Vite emits
+content-hashed production files. Their selection and display name are isolated in
 `src/config/character.ts` and the shared stylesheet so a later Aemeath asset replacement does not
 require chat, Session, or Auth changes.
 

@@ -1,143 +1,138 @@
 # Aemeath Agent
 
-Aemeath Agent is a CLI roleplay dialogue agent based on Aemeath from Wuthering
-Waves. Its v0.3 baseline and current development checkpoint combine a composable
-Character system, World Info RAG, first-class Sessions, recent conversation,
-optional extracted long-term memory, a shared turn-level semantic query,
-DeepSeek-compatible model calls, and local prompt debugging.
+Aemeath Agent is an invitation-only, single-character roleplay dialogue system based on Aemeath
+from Wuthering Waves. `v1.0.0-rc.1` is the first deployment-oriented release candidate: it combines
+the existing CLI and modular agent runtime with a browser client, streaming chat, durable Sessions,
+browser authentication, usage quotas, observability, and a single-node Docker deployment.
 
-## v0.3 Baseline And Current Checkpoint Features
+## Release Status
 
-- CLI multi-turn dialogue.
-- Character v0.2 manifest loaded from `app/character/Aemeath.v0.2/`.
-- World Info keyword RAG through `WorldInfoEvidenceProvider`.
-- First-class Session identity, ownership, lifecycle, and message statistics.
-- Recent conversation as the always-available short-term memory baseline.
-- Optional LLM-extracted long-term memory with explicit and window triggers.
-- Scope-aware memory recall: `user_global`, `character`, and `session`.
-- Approved SiliconFlow BGE-M3 embeddings for normal Memory/Semantic runtime, plus deterministic
-  Hash embeddings for tests and explicit development; local BGE-M3 remains qualification-gated.
-- Standalone memory extraction worker and manual extraction command.
-- Prompt context assembled as structured sections before model calls.
-- Optional deterministic prompt context budget with protected role and safety sections.
-- Local JSONL prompt-run logs under `.aemeath/sessions/`.
-- Prompt log inspector for debugging prompt, RAG, memory, and response behavior.
-- Mock model mode for local testing without an API key.
+- Current release: `v1.0.0-rc.1`.
+- Code and local/Linux validation are complete for the small invitation launch profile.
+- D8 real-ECS acceptance is still required before promoting this candidate to stable `v1.0.0`.
+- The first public profile is CPU-only, text-only, single-node, and runs one Uvicorn worker.
+- Long-term Memory Worker, local BGE-M3, managed vector RAG, audio, and public registration remain
+  disabled in production.
 
-## Quick Start
+See [the v1.0.0 RC release notes](docs/releases/v1.0.0-rc.1.md) and
+[the deployment runbook](docs/deployment.md) for the exact boundary.
 
-Install dependencies:
+## Current Capabilities
 
-```bash
-pip install -e .[dev]
-```
+- Character v0.2 manifest and structured prompt assembly.
+- Curated World Info keyword evidence through `WorldInfoEvidenceProvider`.
+- First-class dialogue Sessions with ownership, title, lifecycle, history, and cursor pagination.
+- Recent conversation, optional extracted long-term Memory, and relationship state.
+- Shared turn-level semantic query and deterministic context budget.
+- DeepSeek-compatible synchronous and streaming model clients.
+- Durable SSE streaming with idempotency, cancellation, replay, and disconnect-safe cleanup.
+- Invitation-only browser accounts, Cookie Sessions, CSRF, password reset, and password change.
+- Per-account daily turn/token-estimate quotas and pre-auth abuse controls.
+- React/TypeScript/Vite Web client for login, Session management, and streaming chat.
+- JSONL App/Trace logs plus optional local prompt-run debugging.
+- SQLite raw and SQLAlchemy-on-SQLite persistence adapters with parity tests.
+- Non-root Docker Compose deployment with Caddy HTTPS ingress and static SPA hosting.
+- SQLite backup, verification, restore, log retention, and host health operations.
 
-Copy the environment template:
-
-```bash
-copy .env.example .env
-```
-
-Run with the mock model:
-
-```env
-AEMEATH_USE_MOCK_LLM=true
-```
-
-Start the CLI:
-
-```bash
-python -m app.cli
-```
-
-Useful CLI commands:
+## Architecture
 
 ```text
-/help
-/exit
-/session current
-/session new
-/session list
-/session resume <session_id>
-/session end [session_id]
-/session archive [session_id]
-/memory list
-/memory delete <memory_id>
-/memory disable <memory_id>
-/memory extract [limit]
-/memory debug on|off
+Browser
+  -> Caddy: HTTPS, static SPA, security headers, API proxy
+  -> FastAPI: Browser Auth, CSRF, rate limit, quota, request ID
+  -> AgentStreamService / SessionService
+  -> DialogueTurnEngine
+  -> Character / Semantic / Memory / Evidence / Prompt / Model / State ports
+  -> SQLite
+
+CLI
+  -> AgentService
+  -> the same DialogueTurnEngine and domain ports
 ```
 
-## FastAPI Service
+`DialogueController` and `DialogueTurnEngine` orchestrate stable ports. HTTP, Cookie, SSE, storage,
+provider, and MCP details remain outside the Character, Memory, RAG, Prompt, and State policies.
+See [architecture.md](docs/architecture.md) and [interfaces.md](docs/interfaces.md).
 
-Install API dependencies:
+## Local CLI
+
+Install development dependencies:
 
 ```bash
 pip install -e .[dev,api]
 ```
 
-For local dev-token auth, set:
+Copy `.env.example` to `.env`, then use the mock model when no paid Provider call is wanted:
 
 ```env
-AEMEATH_DEV_AUTH_TOKEN=change-me-local-dev-token
-AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER=false
-AEMEATH_API_ENABLE_PROMPT_RUN_LOG=false
-AEMEATH_API_ENABLE_MODEL_FALLBACK=false
+AEMEATH_USE_MOCK_LLM=true
 ```
 
-Start the API:
+Run:
 
 ```bash
+python -m app.cli
+```
+
+Useful commands include `/help`, `/session list`, `/session new`, `/memory list`, and `/exit`.
+
+## Local Web
+
+Start FastAPI in Web Session mode on `127.0.0.1:8000`, then start Vite:
+
+```powershell
 uvicorn app.api.server:create_app --factory --host 127.0.0.1 --port 8000
+cd web
+npm ci
+npm run dev
 ```
 
-`GET /health` is public. `/v1/*` endpoints require
-`Authorization: Bearer <dev token>` by default. Local default-user access is only enabled when
-`AEMEATH_API_ALLOW_LOCAL_DEFAULT_USER=true`.
+Open `http://127.0.0.1:5173`. Vite proxies `/v1`, `/health`, and `/ready` to FastAPI so browser
+cookies remain same-origin. Browser accounts and invitation/reset tokens are managed through:
 
-For API runtime, prompt-run logging is disabled by default through
-`AEMEATH_API_ENABLE_PROMPT_RUN_LOG=false`. Prompt logs contain full prompt/message snapshots and
-should be treated as sensitive local debugging artifacts. Removing `AEMEATH_DEV_AUTH_TOKEN` from
-the environment revokes the configured dev token hash on startup for the configured
-`AEMEATH_DEV_AUTH_USER_ID`.
-
-API runtime disables model fallback by default through `AEMEATH_API_ENABLE_MODEL_FALLBACK=false`,
-so provider auth/rate-limit/timeout errors are surfaced as stable API errors instead of mock
-fallback responses. CLI runtime keeps graceful fallback enabled by default.
-
-Current v0.1 endpoints:
-
-```text
-GET  /health
-POST /v1/chat
-GET  /v1/sessions
-POST /v1/sessions
-GET  /v1/sessions/{session_id}/messages
+```bash
+python -m app.auth.admin --help
 ```
 
-`POST /v1/chat` is synchronous and calls the service layer. If the supplied `session_id` does not
-exist yet, v0.1 follows the existing runtime behavior and creates it through `ensure_session`.
-Token-by-token streaming is deferred for a future `/v1/chat/stream` endpoint.
+The public Web flow uses `POST /v1/chat/stream`. Synchronous `/v1/chat` remains available for
+development compatibility but is denied by both FastAPI and Caddy in the production Web profile.
 
-## DeepSeek Runtime
+## Production Profile
 
-To call DeepSeek, edit `.env`:
+The tracked deployment target is:
 
-```env
-AEMEATH_USE_MOCK_LLM=false
-DEEPSEEK_API_KEY=your_deepseek_api_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_THINKING=disabled
-DEEPSEEK_REASONING_EFFORT=
+- Ubuntu 22.04 x86_64 / `linux/amd64`.
+- One ECS host, one API container, one Caddy container, one Uvicorn worker.
+- `sqlite_raw`, invitation-only `web_session`, Context Budget enabled.
+- DeepSeek over HTTPS; no mock or model fallback.
+- App/Trace logs enabled; full prompt-run logs disabled.
+- Long-term Memory, Memory Worker, Hash embedding, vector RAG, and audio disabled.
+- Daily invitation-test quota of 50 turns and 200,000 `prompt_utf8_v0_1` estimated tokens.
+
+Start with [deploy/prod.env.example](deploy/prod.env.example). Production secrets are mounted files;
+never commit `.env`, API keys, CSRF keys, databases, logs, generated indexes, or rendered Compose
+configurations containing secrets.
+
+Build the frontend before the Caddy image:
+
+```bash
+cd web
+npm ci
+npm test
+npm run build
+cd ..
+python scripts/deployment/check_deploy_lock.py
+docker compose --env-file /etc/aemeath/prod.env config -q
+docker compose --env-file /etc/aemeath/prod.env up -d api
+docker compose --env-file /etc/aemeath/prod.env up -d proxy
 ```
 
-Do not commit `.env` or real API keys.
+Do not enable the `memory` profile in the first release. Backup and restore use the one-shot `ops`
+and `restore` profiles under the D6 runbook.
 
-## Long-term Memory
+## Optional Development Systems
 
-Long-term memory is disabled by default. For real semantic retrieval through the approved
-SiliconFlow BGE-M3 Profile, configure `.env` with:
+Long-term Memory can use the approved SiliconFlow BGE-M3 Profile in development:
 
 ```env
 AEMEATH_ENABLE_LONG_TERM_MEMORY=true
@@ -146,157 +141,35 @@ AEMEATH_EMBEDDING_ALLOW_HASH=false
 SILICONFLOW_API_KEY=your_siliconflow_api_key
 ```
 
-`siliconflow_pro_bge_m3_v1` is a version-controlled, qualified 1024-dimensional
-`Pro/BAAI/bge-m3` vector space. Its API key remains local runtime configuration and must not be
-committed. The deterministic Hash Profile has no additional model dependency and remains approved
-only for tests and explicit development. Select it explicitly with
-`AEMEATH_EMBEDDING_PROFILE=deterministic_hash_v1` and `AEMEATH_EMBEDDING_ALLOW_HASH=true`.
+The deterministic Hash Profile is restricted to tests and explicit development. Provider failure
+never silently switches to Hash. Managed embedding RAG tooling exists under `app/retrieval/`, but
+the dialogue runtime continues to use World Info keyword evidence.
 
-The legacy
-`AEMEATH_MEMORY_EMBEDDING_PROVIDER=hash` setting remains available for one
-compatibility release and resolves through the same approved-profile gate.
-The local BGE-M3 Profile remains unavailable to normal runtime until separately qualified and
-approved. Provider failures never trigger an implicit Hash fallback.
+## Validation
 
-The CLI can extract recent messages synchronously:
-
-```text
-/memory extract
-/memory extract 20
-```
-
-Queued extraction jobs are processed by a separate worker:
+Backend:
 
 ```bash
-python -m app.memory.worker
+pytest -q
+python -m ruff check .
+python -m compileall -q app scripts tests
+python scripts/deployment/check_deploy_lock.py
+git diff --check
 ```
 
-The worker repairs missing or invalid exact-signature Memory artifacts in
-bounded batches. Repair cadence and backoff use
-`AEMEATH_MEMORY_REPAIR_BATCH_SIZE`, `AEMEATH_MEMORY_REPAIR_INTERVAL_SECONDS`,
-and `AEMEATH_MEMORY_REPAIR_MAX_BACKOFF_SECONDS`.
-
-When long-term Memory is enabled, the dialogue runtime constructs one turn-local
-semantic query and shares its resolved embedding with Memory recall. The query
-and vector are not persisted. Memory does not issue a second query embedding;
-keyword and explicit-recall fallbacks remain available when semantic resolution
-is skipped or temporarily unavailable. Canonical RAG and Character example
-selection do not consume this context yet.
-
-## Prompt Context Budget
-
-The context budget is disabled by default. Enable the deterministic v0.1 policy with:
-
-```env
-AEMEATH_ENABLE_CONTEXT_BUDGET=true
-AEMEATH_CONTEXT_BUDGET_MAX_CHARS=24000
-AEMEATH_CONTEXT_BUDGET_RECENT_MESSAGE_LIMIT=8
-AEMEATH_CONTEXT_BUDGET_MEMORY_LIMIT=4
-AEMEATH_CONTEXT_BUDGET_EVIDENCE_LIMIT=4
-```
-
-The policy trims optional Style, Voice, Canon, Memory, and Recent sections in that order. Character
-identity, role rules, safety boundaries, relationship state, unknown sections, and the current user
-message are never truncated. This is a deterministic character-count guardrail rather than an exact
-model-token limit. Prompt-run metadata records kept/dropped ids and counts without storing removed
-content.
-
-## Prompt Logs
-
-Prompt-run logging is enabled by default:
-
-```env
-AEMEATH_ENABLE_PROMPT_RUN_LOG=true
-AEMEATH_PROMPT_RUN_LOG_ROOT=.aemeath/sessions
-```
-
-After at least one successful CLI turn, inspect the latest prompt log:
+Frontend:
 
 ```bash
-python scripts/inspect_prompt_log.py
+cd web
+npm test
+npm run build
 ```
 
-Common options:
-
-```bash
-python scripts/inspect_prompt_log.py --limit 3
-python scripts/inspect_prompt_log.py --show-system
-python scripts/inspect_prompt_log.py --hide-sections
-```
-
-Logs are local runtime data and are ignored by git.
-
-## RAG And Data
-
-The active v0.3 runtime uses the curated World Info file:
-
-```text
-app/retrieval/data/Aemeath_World_Info.json
-```
-
-The `source_doc/` directory is treated as local source material and is not part
-of the release branch.
-
-Managed embedding RAG tooling exists under `app/retrieval/`, but vector RAG is
-not the active provider in the main runtime. Each managed generation has an
-isolated SQLite database, canonical inventory, checkpoint, and ready manifest.
-The active runtime remains `WorldInfoEvidenceProvider`.
-
-Build an explicit development Hash generation:
-
-```bash
-python -m app.retrieval.manage_rag_index build --profile deterministic_hash_v1 --allow-hash
-```
-
-Inspect or query managed generations:
-
-```bash
-python -m app.retrieval.manage_rag_index status
-python -m app.retrieval.manage_rag_index query --profile deterministic_hash_v1 --allow-hash "query"
-```
-
-The managed root defaults to `data/rag_indexes` and can be changed with
-`AEMEATH_RAG_INDEX_ROOT`. Hash requires explicit approval on every build/query. The approved
-SiliconFlow Profile may be selected by the standalone managed-index tooling when its API key is
-configured, but vector RAG is still not wired into the dialogue runtime. Local BGE-M3 remains
-unavailable until separately approved.
-
-## Upgrading From v0.2
-
-Back up `data/aemeath.db` before first starting v0.3. SQLite initialization
-automatically creates Session records for legacy dialogue data and applies the
-versioned long-term-memory scope/provenance migration. Existing memories remain
-visible as `user_global` memories.
-
-Detailed release and migration notes are in
-[`docs/releases/v0.3.md`](docs/releases/v0.3.md).
-
-## Tests
-
-Run:
-
-```bash
-pytest
-ruff check .
-```
-
-Current development-checkpoint validation:
-
-```text
-437 passed
-All checks passed
-```
+Real ECS HTTPS, reboot persistence, image replacement, D6 restore, and authenticated browser smoke
+remain the D8 promotion gate for stable `v1.0.0`.
 
 ## Project Coordination
 
-This project is managed as a multi-session coding effort. New coding sessions
-should read:
-
-```text
-AGENTS.md
-docs/architecture.md
-docs/interfaces.md
-docs/task_log.md
-```
-
-The manager session owns architecture, task splitting, and interface stability.
+This repository is developed through multiple coding sessions. New sessions must read `AGENTS.md`,
+`docs/architecture.md`, `docs/interfaces.md`, and `docs/task_log.md`. The Manager session owns
+cross-module contracts, task status, and release acceptance.
