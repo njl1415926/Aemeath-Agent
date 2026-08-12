@@ -2600,3 +2600,20 @@ Manager closure (2026-08-11):
 - The release includes source and reproducible build inputs. `web/dist/` remains generated output;
   `.env`, Provider keys, CSRF keys, SQLite files, JSONL logs, RAG indexes, and local capture material
   remain excluded.
+
+### T-0148 v1.0.0 Production Release Closure
+
+Status: `done`
+
+Manager closure (2026-08-12):
+- Promoted the release metadata from `1.0.0rc1` / `v1.0.0-rc.1` to stable `1.0.0` / `v1.0.0`.
+- Verified the core deployment on a real Ubuntu 22.04 `linux/amd64` ECS host: exact RC commit,
+  clean checkout, locked API image, prebuilt Web artifact, non-root API/Caddy identities, private
+  API port, public DNS, automatic Let's Encrypt certificate, and public HTTPS `/health` response.
+- Confirmed the production topology remains invitation-only, text-only, CPU-only, single-node, one
+  Uvicorn worker, raw SQLite, DeepSeek API, Context Budget, usage quota, App Log, and Trace Log.
+- D5 Memory Worker, production long-term Memory, vector RAG, local embedding, and audio remain
+  deliberately disabled.
+- Reboot persistence, image replacement, D6 restore, scheduled backup/retention/host-health, and
+  broader authenticated browser drills remain operational follow-ups and must be completed before
+  expanding beyond the small invitation launch.

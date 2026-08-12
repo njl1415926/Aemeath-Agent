@@ -1,20 +1,22 @@
 # Aemeath Agent
 
 Aemeath Agent is an invitation-only, single-character roleplay dialogue system based on Aemeath
-from Wuthering Waves. `v1.0.0-rc.1` is the first deployment-oriented release candidate: it combines
-the existing CLI and modular agent runtime with a browser client, streaming chat, durable Sessions,
-browser authentication, usage quotas, observability, and a single-node Docker deployment.
+from Wuthering Waves. `v1.0.0` is the first production release: it combines the existing CLI and
+modular agent runtime with a browser client, streaming chat, durable Sessions, browser
+authentication, usage quotas, observability, and a single-node Docker deployment.
 
 ## Release Status
 
-- Current release: `v1.0.0-rc.1`.
-- Code and local/Linux validation are complete for the small invitation launch profile.
-- D8 real-ECS acceptance is still required before promoting this candidate to stable `v1.0.0`.
+- Current release: `v1.0.0`.
+- The core real-ECS path is accepted: Ubuntu 22.04 `linux/amd64`, non-root API/Caddy containers,
+  public DNS, automatic trusted HTTPS, private API port, and provider-free health/readiness.
+- Reboot persistence, image replacement, D6 restore, and scheduled host-operations drills remain
+  tracked operational follow-ups; they do not expand the frozen small-launch product boundary.
 - The first public profile is CPU-only, text-only, single-node, and runs one Uvicorn worker.
 - Long-term Memory Worker, local BGE-M3, managed vector RAG, audio, and public registration remain
   disabled in production.
 
-See [the v1.0.0 RC release notes](docs/releases/v1.0.0-rc.1.md) and
+See [the v1.0.0 release notes](docs/releases/v1.0.0.md) and
 [the deployment runbook](docs/deployment.md) for the exact boundary.
 
 ## Current Capabilities
@@ -165,8 +167,9 @@ npm test
 npm run build
 ```
 
-Real ECS HTTPS, reboot persistence, image replacement, D6 restore, and authenticated browser smoke
-remain the D8 promotion gate for stable `v1.0.0`.
+The core real-ECS HTTPS path is verified. Before inviting additional users, complete the remaining
+reboot persistence, image replacement, D6 restore, and scheduled host-operations drills in the
+deployment runbook.
 
 ## Project Coordination
 

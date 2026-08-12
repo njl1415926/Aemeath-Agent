@@ -1,8 +1,9 @@
 # Deployment v0.1 - D1-D7 and Web Phase 3 Lite operator contract
 
-Status: D1-D4 and D6-D7 accepted; D5 remains disabled and D8 remains pending.
-This is not yet a complete ECS runbook because the Memory Worker gates and real ECS staging
-acceptance remain open.
+Status: D1-D4 and D6-D7 accepted; D5 remains disabled. The D8 core ECS launch path was accepted on
+2026-08-12 using Ubuntu 22.04 `linux/amd64`, public DNS, trusted HTTPS, a private API port, and
+healthy API/Caddy containers. Reboot persistence, image replacement, D6 restore, and scheduled
+host-operation drills remain required operational follow-ups.
 
 ## Fixed first-release boundary
 

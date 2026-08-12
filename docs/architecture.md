@@ -1,8 +1,8 @@
 # Aemeath Agent Architecture
 
-## 2026-08-11 v1.0.0-rc.1 Release Candidate
+## 2026-08-12 v1.0.0 Production Release
 
-The current release candidate promotes the invitation-only Web path to the primary deployment
+The current release promotes the invitation-only Web path to the primary deployment
 surface while preserving the CLI and the existing port-based domain architecture:
 
 ```text
@@ -16,10 +16,12 @@ Browser -> Caddy -> FastAPI
 
 T-0142 through T-0145 are accepted. T-0146 Phase 3 Lite supplies the frozen production Web profile,
 same-origin SPA, security headers, and invitation-test quota. Deployment D1-D4 and D6-D7 are
-accepted. D5 remains deliberately disabled; D8 real-ECS HTTPS, browser, reboot, image-replacement,
-and restore evidence is the only stable-v1.0 promotion gate.
+accepted. D5 remains deliberately disabled. The D8 core ECS gate is accepted with real Ubuntu
+22.04 `linux/amd64` images, public DNS, trusted HTTPS, private API exposure, and healthy Caddy/API
+services. Reboot, image-replacement, restore, and scheduled host-operation drills remain explicit
+operational follow-ups.
 
-The production RC remains one host and one Uvicorn worker because admission, streaming registry,
+The production release remains one host and one Uvicorn worker because admission, streaming registry,
 rate limits, and the LLM gate are process-local. Long-term Memory, Memory Worker, local embedding,
 managed vector RAG, and audio are not active production dependencies.
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.0 - 2026-08-12
+
+- Promoted the invitation-only Web release after the core path ran on a real Ubuntu 22.04 ECS host.
+- Verified the locked non-root API/Caddy images, private API port, public DNS, trusted Let's Encrypt
+  HTTPS, and public health endpoint.
+- Added the production release notes and the end-to-end server bootstrap runbook.
+- Kept the small-launch boundary unchanged: Memory Worker, production long-term Memory, vector RAG,
+  local embedding, audio, public registration, and horizontal scaling remain disabled.
+- Kept reboot, image replacement, D6 restore, and scheduled host-operation drills as explicit
+  operational follow-ups before expanding the invitation group.
+
 ## v1.0.0-rc.1 - 2026-08-11
 
 - Added the invitation-only React/Vite Web client with Cookie Session authentication and CSRF.
